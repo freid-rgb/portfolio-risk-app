@@ -694,4 +694,22 @@ with tab7:
                         "Price": info.get('last_price', np.nan),
                         "Daily Change (%)": (info.get('last_price', 0) / info.get('previous_close', 1) - 1) * 100,
                         "YTD Return (%)": ytd_ret,
-                        "52W High": info.get
+                        "52W High": info.get('year_high', np.nan),
+                        "52W Low": info.get('year_low', np.nan),
+                        "Currency": curr
+                    })
+                except:
+                    continue
+            return pd.DataFrame(data)
+            
+        watch_data = fetch_watchlist_data(tuple(watch_tickers))
+        
+        if not watch_data.empty:
+            watch_style = watch_data.style.format({
+                "Price": "{:.2f}",
+                "Daily Change (%)": "{:+.2f}%",
+                "YTD Return (%)": "{:+.2f}%",
+                "52W High": "{:.2f}",
+                "52W Low": "{:.2f}"
+            }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Daily Change (%)", "YTD Return (%)"])
+            st.dataframe(watch_style, use_container_width=True)
