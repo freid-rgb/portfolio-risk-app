@@ -7,3 +7,4 @@ scipy>=1.11
 gspread>=6.0.0
 google-auth>=2.0.0
 streamlit-autorefresh
+gspread-dataframe
