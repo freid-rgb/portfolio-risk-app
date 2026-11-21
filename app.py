@@ -17,7 +17,7 @@ st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level 
 # GOOGLE SHEETS CONNECTION
 # -----------------------------
 # Replace this with your actual Spreadsheet ID (the long string in the URL)
-SPREADSHEET_ID = "YOUR_SPREADSHEET_ID_HERE"
+SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 
 @st.cache_resource
 def get_gspread_client():
