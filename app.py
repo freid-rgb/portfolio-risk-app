@@ -16,21 +16,39 @@ st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level 
 # -----------------------------
 # GOOGLE SHEETS CONNECTION
 # -----------------------------
-conn = st.connection("gsheets", type=GSheetsConnection)
+# Replace this with your actual Spreadsheet ID (the long string in the URL)
+SPREADSHEET_ID = "YOUR_SPREADSHEET_ID_HERE"
+
+@st.cache_resource
+def get_gspread_client():
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly"
+        ]
+    )
+    client = gspread.authorize(creds)
+    return client
 
 @st.cache_data(ttl=300, show_spinner="Loading portfolio from Google Sheets...")
-def load_portfolio():
+def load_portfolio_from_sheet(sheet_id):
     try:
-        df = conn.read()
+        client = get_gspread_client()
+        sheet = client.open_by_key(sheet_id).sheet1
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
         return df
     except Exception as e:
         st.error(f"Error loading Google Sheet: {e}")
         return pd.DataFrame()
 
-df = load_portfolio()
+# Load the data
+df = load_portfolio_from_sheet(SPREADSHEET_ID)
 
 if df.empty:
-    st.warning("No data found. Please ensure your Google Sheet has data.")
+    st.warning("No data found. Please ensure your Google Sheet has data and the ID is correct.")
     st.stop()
 
 df.columns = [c.strip() for c in df.columns]
@@ -178,7 +196,7 @@ sortino = ann_ret / downside_vol if downside_vol else np.nan
 cum = (1 + port_ret).cumprod()
 mdd = (cum / cum.cummax() - 1).min()
 
-# NEW: Benchmark Metrics (Tracking Error, Alpha, Info Ratio)
+# Benchmark Metrics (Tracking Error, Alpha, Info Ratio)
 bench_ann_ret = (1 + bench_ret).prod() ** (252 / len(bench_ret)) - 1
 active_ret = port_ret - bench_ret
 tracking_error = active_ret.std() * np.sqrt(252)
@@ -299,7 +317,6 @@ with tab2:
     c2.metric("Portfolio Alpha", f"{alpha*100:.1f}%", help="Excess return above what is predicted by Beta.")
     c3.metric("Benchmark Ann. Return", f"{bench_ann_ret*100:.1f}%")
 
-    # NEW: Portfolio vs Benchmark Growth Chart
     st.subheader("Growth of $10,000 (Portfolio vs Benchmark)")
     cum_port = (1 + port_ret).cumprod() * 10000
     cum_bench = (1 + bench_ret).cumprod() * 10000
