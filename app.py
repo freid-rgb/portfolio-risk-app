@@ -5,10 +5,59 @@ import yfinance as yf
 import plotly.express as px
 from datetime import datetime
 from scipy.optimize import brentq
+import gspread
+from google.oauth2 import service_account
 
 st.set_page_config(page_title="Portfolio Risk Tracker", layout="wide")
 st.title("📊 Portfolio Risk & Traits Tracker")
 st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level P&L")
+
+# -----------------------------
+# GOOGLE SHEETS CONNECTION
+# -----------------------------
+# Replace this with your actual Spreadsheet ID (the long string in the URL)
+SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
+
+@st.cache_resource
+def get_gspread_client():
+    # Load secrets from Streamlit Cloud
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = service_account.Credentials.from_service_account_info(creds_dict)
+    client = gspread.authorize(creds)
+    return client
+
+@st.cache_data(ttl=300, show_spinner="Loading portfolio from Google Sheets...")
+def load_portfolio_from_sheet(sheet_id):
+    try:
+        client = get_gspread_client()
+        sheet = client.open_by_key(sheet_id).sheet1
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        return df
+    except Exception as e:
+        st.error(f"Error loading Google Sheet: {e}")
+        return pd.DataFrame()
+
+# Load the data
+df = load_portfolio_from_sheet(SPREADSHEET_ID)
+
+if df.empty:
+    st.warning("No data found. Please ensure your Google Sheet has data and the ID is correct.")
+    st.stop()
+
+df.columns = [c.strip() for c in df.columns]
+
+required = ["Symbol", "Current Price", "Trade Date", "Purchase Price", "Quantity"]
+missing = [c for c in required if c not in df.columns]
+if missing:
+    st.error(f"Missing required columns in Google Sheet: {missing}")
+    st.stop()
+
+# Clean data types
+df["Trade Date"] = pd.to_datetime(df["Trade Date"].astype(str), format="%Y%m%d", errors="coerce")
+for c in ["Current Price", "Purchase Price", "Quantity"]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+df = df.dropna(subset=["Symbol", "Current Price", "Purchase Price", "Quantity"])
 
 # -----------------------------
 # Sidebar controls
@@ -21,35 +70,14 @@ with st.sidebar:
     horizon_days = st.number_input("VaR horizon (trading days)", 1, 30, 1)
     fx_ticker = st.text_input("CAD→USD FX ticker", "CADUSD=X")
     st.markdown("---")
+    if st.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
     st.caption("Data: yfinance (unofficial). Personal use only.")
-
-# -----------------------------
-# CSV upload / sample
-# -----------------------------
-uploaded = st.file_uploader("Upload your portfolio CSV", type="csv")
-
-if not uploaded:
-    st.info("Upload a CSV with columns: Symbol, Current Price, Trade Date, Purchase Price, Quantity")
-    st.stop()
-
-df = pd.read_csv(uploaded, sep=None, engine="python")
-df.columns = [c.strip() for c in df.columns]
-
-required = ["Symbol", "Current Price", "Trade Date", "Purchase Price", "Quantity"]
-missing = [c for c in required if c not in df.columns]
-if missing:
-    st.error(f"Missing required columns: {missing}")
-    st.stop()
-
-df["Trade Date"] = pd.to_datetime(df["Trade Date"].astype(str), format="%Y%m%d", errors="coerce")
-for c in ["Current Price", "Purchase Price", "Quantity"]:
-    df[c] = pd.to_numeric(df[c], errors="coerce")
-df = df.dropna(subset=["Symbol", "Current Price", "Purchase Price", "Quantity"])
 
 # -----------------------------
 # Currency handling
 # -----------------------------
-# CSU.TO and any .TO ticker -> CAD. Normalize to USD.
 df["Currency"] = np.where(df["Symbol"].str.endswith(".TO"), "CAD", "USD")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -78,10 +106,9 @@ pos = df.groupby("Symbol").agg(
     Quantity=("Quantity", "sum"),
     Market_Value=("Market Value", "sum"),
     Cost_Basis=("Cost Basis", "sum"),
-    Avg_Purchase_Price=("Purchase Price USD", lambda s: np.nan),  # recompute below
+    Avg_Purchase_Price=("Purchase Price USD", lambda s: np.nan), 
 ).reset_index()
 
-# correct weighted avg purchase price
 wavg = df.groupby("Symbol").apply(
     lambda g: (g["Purchase Price USD"] * g["Quantity"]).sum() / g["Quantity"].sum(),
     include_groups=False,
@@ -112,13 +139,11 @@ def fetch_prices(tickers, bench, start, end):
 
 prices = fetch_prices(tuple(tickers), bench, start_date, end_date)
 
-# Normalize CAD tickers to USD
 if cad_usd:
     for t in tickers:
         if t.endswith(".TO") and t in prices.columns:
             prices[t] = prices[t] * cad_usd
 
-# Align: drop symbols with insufficient data
 min_obs = int(lookback_years * 200)
 valid = [t for t in tickers if t in prices.columns and prices[t].notna().sum() >= min_obs]
 missing_data = [t for t in tickers if t not in valid]
@@ -135,12 +160,10 @@ if bench not in returns.columns:
     st.stop()
 
 # -----------------------------
-# Weights over valid tickers (renormalize)
+# Weights over valid tickers
 # -----------------------------
 w = pos.set_index("Symbol").loc[valid, "Market_Value"]
 w = w / w.sum()
-
-# Portfolio returns
 port_ret = (returns[valid] * w).sum(axis=1)
 
 # -----------------------------
@@ -160,7 +183,6 @@ ann_vol = port_ret.std() * np.sqrt(252)
 ann_ret = (1 + port_ret).prod() ** (252 / len(port_ret)) - 1
 sharpe = ann_ret / ann_vol if ann_vol else np.nan
 
-# NEW: Sortino Ratio (Downside Volatility only)
 downside_returns = port_ret[port_ret < 0]
 downside_vol = downside_returns.std() * np.sqrt(252)
 sortino = ann_ret / downside_vol if downside_vol else np.nan
@@ -168,7 +190,6 @@ sortino = ann_ret / downside_vol if downside_vol else np.nan
 cum = (1 + port_ret).cumprod()
 mdd = (cum / cum.cummax() - 1).min()
 
-# NEW: YTD Returns (Portfolio & Individual)
 current_year = end_date.year
 ytd_prices = prices[prices.index.year == current_year]
 if not ytd_prices.empty:
@@ -199,17 +220,13 @@ for conf in conf_levels:
     })
 var_df = pd.DataFrame(var_rows)
 
-# NEW: Component VaR (assuming 95% confidence for the breakdown)
 conf_comp = conf_levels[0] if conf_levels else 0.95
 port_var_pct = hist_var(port_ret, conf_comp, horizon_days)
 total_mv = pos["Market_Value"].sum()
 
 comp_var_data = []
 for t in valid:
-    # Individual VaR scaled by weight
     stock_var = hist_var(returns[t], conf_comp, horizon_days)
-    # Component VaR formula (approximation using correlation)
-    # For a more precise component VaR, we'd use marginal VaR, but this gives a great directional view
     corr_with_port = np.corrcoef(returns[t], port_ret)[0,1]
     comp_var_pct = stock_var * w[t] * corr_with_port
     comp_var_usd = comp_var_pct * total_mv
