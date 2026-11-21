@@ -22,7 +22,13 @@ SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 def get_gspread_client():
     # Load secrets from Streamlit Cloud
     creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = service_account.Credentials.from_service_account_info(creds_dict)
+    creds = service_account.Credentials.from_service_account_info(
+    creds_dict,
+    scopes=[
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly"
+    ]
+)
     client = gspread.authorize(creds)
     return client
 
