@@ -19,7 +19,7 @@ st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level 
 # -----------------------------
 # GOOGLE SHEETS CONNECTION (READ/WRITE)
 # -----------------------------
-SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjv" # <--- MAKE SURE THIS IS HERE
+SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw" # <--- MAKE SURE THIS IS HERE
 
 @st.cache_resource
 def get_gspread_client():
