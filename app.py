@@ -12,14 +12,63 @@ from gspread_dataframe import set_with_dataframe
 from google.oauth2 import service_account
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="Portfolio Risk Tracker", layout="wide")
-st.title("📊 Portfolio Risk & Traits Tracker")
-st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level P&L")
+st.set_page_config(page_title="Arrakis Portfolio", layout="wide")
+
+# -------------------------------------------------------------------
+# ARRAKIS CUSTOM CSS (Glowing borders, spice accents, serif fonts)
+# -------------------------------------------------------------------
+st.markdown("""
+<style>
+    /* Main Background */
+    .stApp {
+        background-image: radial-gradient(circle at top right, #2B1F17, #1A1512);
+    }
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background-color: #1A1512 !important;
+        border-right: 1px solid #FF6B00;
+    }
+    
+    /* Glowing Metric Cards */
+    [data-testid="stMetricValue"] {
+        color: #FF6B00 !important;
+        text-shadow: 0 0 5px rgba(255, 107, 0, 0.4);
+        font-family: 'Georgia', serif;
+    }
+    
+    /* Tab Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #2B231D;
+        border-radius: 4px 4px 0px 0px;
+        border: 1px solid #3D3026;
+        color: #EBD5B3;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #FF6B00 !important;
+        color: #1A1512 !important;
+        font-weight: bold;
+    }
+    
+    /* Dataframe styling */
+    [data-testid="stDataFrame"] {
+        border: 1px solid #FF6B00;
+        border-radius: 5px;
+        box-shadow: 0 0 10px rgba(255, 107, 0, 0.1);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🏜️ Arrakis Portfolio Terminal")
+st.caption("Spice · VaR · Beta · Volatility · Cost Basis · Lot-level P&L")
 
 # -----------------------------
 # GOOGLE SHEETS CONNECTION (READ/WRITE)
 # -----------------------------
-SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw" # <--- MAKE SURE THIS IS HERE
+SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 
 @st.cache_resource
 def get_gspread_client():
@@ -34,27 +83,22 @@ def get_gspread_client():
     client = gspread.authorize(creds)
     return client
 
-@st.cache_data(ttl=300, show_spinner="Loading portfolio...")
+@st.cache_data(ttl=300, show_spinner="Loading portfolio from the deep desert...")
 def load_data_from_sheet(sheet_id):
     try:
         client = get_gspread_client()
         sheet = client.open_by_key(sheet_id)
         
-        # Load Portfolio (Sheet1)
         sheet1 = sheet.sheet1
         df_port = pd.DataFrame(sheet1.get_all_records())
         
-        # Load Dividends
         try:
-            sheet_div = sheet.worksheet("Dividends")
-            df_div = pd.DataFrame(sheet_div.get_all_records())
+            df_div = pd.DataFrame(sheet.worksheet("Dividends").get_all_records())
         except:
             df_div = pd.DataFrame(columns=["Date", "Symbol", "Dividend per Share", "Total Cash", "Currency"])
             
-        # Load Watchlist
         try:
-            sheet_watch = sheet.worksheet("Watchlist")
-            df_watch = pd.DataFrame(sheet_watch.get_all_records())
+            df_watch = pd.DataFrame(sheet.worksheet("Watchlist").get_all_records())
         except:
             df_watch = pd.DataFrame(columns=["Symbol"])
             
@@ -109,7 +153,7 @@ is_market_open, current_time = get_market_status()
 # Sidebar controls
 # -----------------------------
 with st.sidebar:
-    st.header("Settings")
+    st.header("Terminal Settings")
     if is_market_open:
         st.success(f"🟢 Market Open ({current_time})")
         live_mode = st.toggle("Live Auto-Refresh (60s)", value=True)
@@ -411,7 +455,7 @@ port_xirr = xirr(cf)
 # -----------------------------
 # DISPLAY
 # -----------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level", "Add Trade", "Dividend History", "Watchlist"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Overview", "Risk & Benchmark", "Holdings", "Lot-level", "Trade", "Dividends", "Watchlist"])
 
 with tab1:
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -423,13 +467,13 @@ with tab1:
     c5.metric("Portfolio XIRR", f"{port_xirr*100:.1f}%" if not np.isnan(port_xirr) else "n/a")
 
     st.subheader("Allocation by market value")
-    fig = px.pie(pos, names="Symbol", values="Market_Value", hole=0.4)
+    fig = px.pie(pos, names="Symbol", values="Market_Value", hole=0.4, color_discrete_sequence=px.colors.sequential.Oranges_r)
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Cost basis vs market value")
     cmp = pos[["Symbol", "Cost_Basis", "Market_Value"]].melt(id_vars="Symbol",
             var_name="Type", value_name="USD")
-    st.plotly_chart(px.bar(cmp, x="Symbol", y="USD", color="Type", barmode="group"),
+    st.plotly_chart(px.bar(cmp, x="Symbol", y="USD", color="Type", barmode="group", color_discrete_sequence=["#4A3B32", "#FF6B00"]),
                     use_container_width=True)
 
 with tab2:
@@ -455,9 +499,9 @@ with tab2:
     cum_port = (1 + port_ret).cumprod() * 10000
     cum_bench = (1 + bench_ret).cumprod() * 10000
     fig_growth = go.Figure()
-    fig_growth.add_trace(go.Scatter(x=cum_port.index, y=cum_port, name="Portfolio", line=dict(color='royalblue', width=2)))
-    fig_growth.add_trace(go.Scatter(x=cum_bench.index, y=cum_bench, name=bench, line=dict(color='gray', width=2, dash='dash')))
-    fig_growth.update_layout(xaxis_title="Date", yaxis_title="Value ($)", hovermode="x unified")
+    fig_growth.add_trace(go.Scatter(x=cum_port.index, y=cum_port, name="Portfolio", line=dict(color='#FF6B00', width=3)))
+    fig_growth.add_trace(go.Scatter(x=cum_bench.index, y=cum_bench, name=bench, line=dict(color='#EBD5B3', width=2, dash='dash')))
+    fig_growth.update_layout(xaxis_title="Date", yaxis_title="Value ($)", hovermode="x unified", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#EBD5B3"))
     st.plotly_chart(fig_growth, use_container_width=True)
 
     st.subheader("Value at Risk (Historical)")
@@ -465,36 +509,38 @@ with tab2:
                  use_container_width=True)
 
     st.subheader("Component VaR & YTD Breakdown")
-    st.dataframe(comp_var_df.style.format({
+    comp_style = comp_var_df.style.format({
         "Stock VaR (%)": "{:.2f}%",
         "Weight (%)": "{:.1f}%",
         "Component VaR ($)": "${:,.0f}",
         "YTD Return (%)": "{:.1f}%"
-    }), use_container_width=True)
+    }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["YTD Return (%)"])
+    st.dataframe(comp_style, use_container_width=True)
 
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Per-holding Beta")
         b = beta_df.merge(pos[["Symbol", "Weight_MV"]], on="Symbol").sort_values("Beta", ascending=False)
         st.plotly_chart(px.bar(b, x="Symbol", y="Beta", color="Weight_MV",
-                               color_continuous_scale="Blues"), use_container_width=True)
+                               color_continuous_scale="Oranges"), use_container_width=True)
     with col2:
         st.subheader("Portfolio return distribution")
-        st.plotly_chart(px.histogram(port_ret * 100, nbins=80, labels={"value": "Daily return (%)"}),
+        st.plotly_chart(px.histogram(port_ret * 100, nbins=80, labels={"value": "Daily return (%)"}, color_discrete_sequence=["#FF6B00"]),
                         use_container_width=True)
 
     st.subheader("Correlation matrix (daily returns)")
     corr = returns[valid].corr()
-    st.plotly_chart(px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r",
+    st.plotly_chart(px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="Oranges",
                               zmin=-1, zmax=1), use_container_width=True)
 
 with tab3:
     show = pos.sort_values("Market_Value", ascending=False).copy()
-    st.dataframe(show.style.format({
+    show_style = show.style.format({
         "Quantity": "{:.4f}", "Market_Value": "${:,.2f}", "Cost_Basis": "${:,.2f}",
         "Avg_Purchase_Price": "${:,.2f}", "Weight_MV": "{:.1%}", "Weight_Cost": "{:.1%}",
         "Unrealized_PnL": "${:,.2f}", "Return_%": "{:.1f}%",
-    }), use_container_width=True)
+    }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Unrealized_PnL", "Return_%"])
+    st.dataframe(show_style, use_container_width=True)
 
 with tab4:
     lots = df.copy().sort_values(["Symbol", "Trade Date"])
@@ -502,14 +548,15 @@ with tab4:
     lots["Lot P&L"] = lots["Market Value"] - lots["Cost Basis"]
     lots["Lot Return %"] = np.where(lots["Cost Basis"] > 0, lots["Lot P&L"] / lots["Cost Basis"] * 100, np.nan)
     lots["Term"] = np.where(lots["Days Held"] >= 365, "Long", "Short")
-    st.dataframe(lots[["Symbol", "Trade Date", "Quantity", "Purchase Price USD", "Current Price USD",
-                       "Cost Basis", "Market Value", "Lot P&L", "Lot Return %", "Days Held", "Term"]]
-                 .style.format({
+    
+    lots_style = lots[["Symbol", "Trade Date", "Quantity", "Purchase Price USD", "Current Price USD",
+                       "Cost Basis", "Market Value", "Lot P&L", "Lot Return %", "Days Held", "Term"]].style.format({
                      "Trade Date": "{:%Y-%m-%d}", "Quantity": "{:.4f}",
                      "Purchase Price USD": "${:,.2f}", "Current Price USD": "${:,.2f}",
                      "Cost Basis": "${:,.2f}", "Market Value": "${:,.2f}",
                      "Lot P&L": "${:,.2f}", "Lot Return %": "{:.1f}%",
-                 }), use_container_width=True)
+                 }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Lot P&L", "Lot Return %"])
+    st.dataframe(lots_style, use_container_width=True)
     st.download_button("Download lot-level CSV", lots.to_csv(index=False), "lots.csv")
 
 with tab5:
@@ -566,7 +613,7 @@ with tab6:
     st.subheader("Dividend History & Breakdown")
     
     if df_div.empty:
-        st.info("No dividends logged yet. As your companies pay out (and you've owned them for the ex-dividend date), they will automatically appear here!")
+        st.info("No dividends logged yet. As your companies pay out, they will automatically appear here!")
     else:
         c1, c2 = st.columns(2)
         c1.metric("Total Dividends Collected (USD)", f"${total_div_usd:,.2f}")
@@ -574,7 +621,7 @@ with tab6:
         
         st.write("### Total Cash by Security (USD)")
         div_by_symbol = df_div.groupby("Symbol")["Total Cash USD"].sum().reset_index().sort_values("Total Cash USD", ascending=False)
-        fig_div = px.bar(div_by_symbol, x="Symbol", y="Total Cash USD", text_auto='.2s', color="Symbol")
+        fig_div = px.bar(div_by_symbol, x="Symbol", y="Total Cash USD", text_auto='.2s', color="Symbol", color_discrete_sequence=px.colors.sequential.Oranges_r)
         fig_div.update_layout(showlegend=False, yaxis_title="Cash Received (USD)")
         st.plotly_chart(fig_div, use_container_width=True)
         
@@ -589,7 +636,6 @@ with tab6:
 with tab7:
     st.subheader("Watchlist Tracker")
     
-    # Form to add to watchlist
     with st.form("add_watchlist_form", clear_on_submit=True):
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -625,7 +671,6 @@ with tab7:
     if df_watch.empty:
         st.info("Watchlist is empty. Add a ticker above!")
     else:
-        # Fetch data for all watchlist tickers
         watch_tickers = df_watch["Symbol"].tolist()
         
         @st.cache_data(ttl=300, show_spinner="Fetching watchlist data...")
@@ -636,14 +681,12 @@ with tab7:
                     ticker = yf.Ticker(t)
                     info = ticker.fast_info
                     
-                    # YTD Return calculation
                     hist = ticker.history(period="ytd")
                     if not hist.empty:
                         ytd_ret = (hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100
                     else:
                         ytd_ret = np.nan
                         
-                    # Currency
                     curr = "CAD" if t.endswith(".TO") else "USD"
                     
                     data.append({
@@ -651,21 +694,4 @@ with tab7:
                         "Price": info.get('last_price', np.nan),
                         "Daily Change (%)": (info.get('last_price', 0) / info.get('previous_close', 1) - 1) * 100,
                         "YTD Return (%)": ytd_ret,
-                        "52W High": info.get('year_high', np.nan),
-                        "52W Low": info.get('year_low', np.nan),
-                        "Currency": curr
-                    })
-                except:
-                    continue
-            return pd.DataFrame(data)
-            
-        watch_data = fetch_watchlist_data(tuple(watch_tickers))
-        
-        if not watch_data.empty:
-            st.dataframe(watch_data.style.format({
-                "Price": "{:.2f}",
-                "Daily Change (%)": "{:+.2f}%",
-                "YTD Return (%)": "{:+.2f}%",
-                "52W High": "{:.2f}",
-                "52W Low": "{:.2f}"
-            }), use_container_width=True)
+                        "52W High": info.get
