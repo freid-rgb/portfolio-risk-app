@@ -4,7 +4,7 @@ import numpy as np
 import yfinance as yf
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import pytz
 from scipy.optimize import brentq
 import gspread
@@ -24,7 +24,6 @@ SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 @st.cache_resource
 def get_gspread_client():
     creds_dict = dict(st.secrets["gcp_service_account"])
-    # UPGRADED SCOPES FOR READ/WRITE
     creds = service_account.Credentials.from_service_account_info(
         creds_dict,
         scopes=[
@@ -35,23 +34,32 @@ def get_gspread_client():
     client = gspread.authorize(creds)
     return client
 
-@st.cache_data(ttl=300, show_spinner="Loading portfolio from Google Sheets...")
-def load_portfolio_from_sheet(sheet_id):
+@st.cache_data(ttl=300, show_spinner="Loading portfolio...")
+def load_data_from_sheet(sheet_id):
     try:
         client = get_gspread_client()
-        sheet = client.open_by_key(sheet_id).sheet1
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
-        return df
+        sheet = client.open_by_key(sheet_id)
+        
+        # Load Portfolio (Sheet1)
+        sheet1 = sheet.sheet1
+        df_port = pd.DataFrame(sheet1.get_all_records())
+        
+        # Load Dividends (Dividends tab)
+        try:
+            sheet_div = sheet.worksheet("Dividends")
+            df_div = pd.DataFrame(sheet_div.get_all_records())
+        except:
+            df_div = pd.DataFrame(columns=["Date", "Symbol", "Dividend per Share", "Total Cash", "Currency"])
+            
+        return df_port, df_div
     except Exception as e:
         st.error(f"Error loading Google Sheet: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-# Load the data
-df = load_portfolio_from_sheet(SPREADSHEET_ID)
+df, df_div = load_data_from_sheet(SPREADSHEET_ID)
 
 if df.empty:
-    st.warning("No data found. Please ensure your Google Sheet has data and the ID is correct.")
+    st.warning("No portfolio data found.")
     st.stop()
 
 df.columns = [c.strip() for c in df.columns]
@@ -145,12 +153,91 @@ df["Current Price USD"] = np.where(df["Currency"] == "CAD", df["Current Price Li
 df["Purchase Price USD"] = np.where(df["Currency"] == "CAD", df["Purchase Price"] * cad_usd, df["Purchase Price"])
 
 # -----------------------------
+# DIVIDEND AUTO-TRACKER
+# -----------------------------
+@st.cache_data(ttl=3600, show_spinner="Checking for new dividends...")
+def check_and_update_dividends(sheet_id, tickers):
+    try:
+        client = get_gspread_client()
+        sheet = client.open_by_key(sheet_id)
+        
+        try:
+            sheet_div = sheet.worksheet("Dividends")
+        except:
+            return None # Tab doesn't exist
+            
+        existing_divs = pd.DataFrame(sheet_div.get_all_records())
+        if existing_divs.empty:
+            existing_divs = pd.DataFrame(columns=["Date", "Symbol", "Dividend per Share", "Total Cash", "Currency"])
+            
+        new_rows = []
+        
+        for t in tickers:
+            try:
+                ticker = yf.Ticker(t)
+                divs = ticker.dividends
+                if divs.empty:
+                    continue
+                
+                # Get most recent dividend
+                last_div_date = divs.index[-1].strftime("%Y-%m-%d")
+                last_div_amt = float(divs.iloc[-1])
+                
+                # Check if we already logged this payout
+                already_logged = existing_divs[
+                    (existing_divs["Symbol"] == t) & 
+                    (existing_divs["Date"] == last_div_date)
+                ]
+                
+                # If not logged, and it happened in the last 30 days, log it
+                if already_logged.empty:
+                    days_ago = (datetime.now() - divs.index[-1].replace(tzinfo=None)).days
+                    if 0 <= days_ago <= 30:
+                        # Calculate total cash based on current shares
+                        total_shares = df[df["Symbol"] == t]["Quantity"].sum()
+                        if total_shares > 0:
+                            new_rows.append({
+                                "Date": last_div_date,
+                                "Symbol": t,
+                                "Dividend per Share": last_div_amt,
+                                "Total Cash": total_shares * last_div_amt,
+                                "Currency": "CAD" if t.endswith(".TO") else "USD"
+                            })
+            except:
+                continue
+                
+        # Write new dividends to sheet
+        if new_rows:
+            existing_df = pd.concat([existing_divs, pd.DataFrame(new_rows)], ignore_index=True)
+            set_with_dataframe(sheet_div, existing_df)
+            return True
+        return False
+    except Exception as e:
+        st.sidebar.error(f"Dividend check failed: {e}")
+        return False
+
+# Run the check (only writes if new dividends found)
+dividends_updated = check_and_update_dividends(SPREADSHEET_ID, tuple(tickers))
+if dividends_updated:
+    st.toast("🎉 New dividends detected and logged to your sheet!")
+    df_div = pd.DataFrame(get_gspread_client().open_by_key(SPREADSHEET_ID).worksheet("Dividends").get_all_records())
+
+# Calculate Total Dividends USD
+total_div_usd = 0
+if not df_div.empty:
+    df_div["Total Cash"] = pd.to_numeric(df_div["Total Cash"], errors="coerce").fillna(0)
+    total_div_usd = np.where(
+        df_div["Currency"] == "CAD", 
+        df_div["Total Cash"] * cad_usd, 
+        df_div["Total Cash"]
+    ).sum()
+
+# -----------------------------
 # Position aggregation
 # -----------------------------
 df["Market Value"] = df["Current Price USD"] * df["Quantity"]
 df["Cost Basis"] = df["Purchase Price USD"] * df["Quantity"]
 
-# NEW: Calculate Daily P&L (Current Price - Previous Close) * Quantity
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_prev_closes(tickers):
     prev_closes = {}
@@ -168,7 +255,6 @@ df["Prev Close USD"] = np.where(df["Currency"] == "CAD", df["Prev Close"] * cad_
 df["Daily P&L"] = (df["Current Price USD"] - df["Prev Close USD"]) * df["Quantity"]
 
 daily_pnl = df["Daily P&L"].sum()
-daily_pnl_pct = (daily_pnl / df["Market Value"].sum()) * 100 if df["Market Value"].sum() else 0
 
 pos = df.groupby("Symbol").agg(
     Quantity=("Quantity", "sum"),
@@ -320,7 +406,7 @@ def xirr(cashflows):
         return np.nan
 
 cf = [(d, -amt) for d, amt in zip(df["Trade Date"], df["Cost Basis"]) if pd.notna(d)]
-cf.append((end_date, df["Market Value"].sum()))
+cf.append((end_date, df["Market Value"].sum() + total_div_usd)) # Include dividends in final cashflow
 cf = sorted(cf, key=lambda x: x[0])
 port_xirr = xirr(cf)
 
@@ -330,12 +416,13 @@ port_xirr = xirr(cf)
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level", "Add Trade"])
 
 with tab1:
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Market Value (USD)", f"${pos['Market_Value'].sum():,.0f}", delta=f"${daily_pnl:,.0f} Today")
     c2.metric("Total Cost Basis (USD)", f"${pos['Cost_Basis'].sum():,.0f}")
     c3.metric("Unrealized P&L", f"${pos['Unrealized_PnL'].sum():,.0f}",
               f"{pos['Unrealized_PnL'].sum()/pos['Cost_Basis'].sum()*100:.1f}%")
-    c4.metric("Portfolio XIRR", f"{port_xirr*100:.1f}%" if not np.isnan(port_xirr) else "n/a")
+    c4.metric("Dividends Collected", f"${total_div_usd:,.0f}")
+    c5.metric("Portfolio XIRR", f"{port_xirr*100:.1f}%" if not np.isnan(port_xirr) else "n/a")
 
     st.subheader("Allocation by market value")
     fig = px.pie(pos, names="Symbol", values="Market_Value", hole=0.4)
@@ -429,8 +516,6 @@ with tab4:
 
 with tab5:
     st.subheader("Add a New Trade")
-    st.write("Fill out the form below to append a trade directly to your Google Sheet.")
-    
     with st.form("add_trade_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -446,7 +531,6 @@ with tab5:
             if not new_symbol:
                 st.error("Please enter a symbol.")
             else:
-                # Prepare the new row
                 new_row = {
                     "Symbol": new_symbol,
                     "Current Price": new_price,
@@ -470,16 +554,12 @@ with tab5:
                 try:
                     client = get_gspread_client()
                     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-                    
-                    # Get existing data to append correctly
                     existing_df = pd.DataFrame(sheet.get_all_records())
                     existing_df = pd.concat([existing_df, pd.DataFrame([new_row])], ignore_index=True)
-                    
-                    # Write it back
                     set_with_dataframe(sheet, existing_df)
                     
                     st.success(f"Successfully added {new_qty} shares of {new_symbol}!")
-                    st.cache_data.clear() # Clear cache so it reloads immediately
+                    st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to add trade: {e}")
