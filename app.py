@@ -8,7 +8,6 @@ from datetime import datetime
 from scipy.optimize import brentq
 import gspread
 from google.oauth2 import service_account
-from streamlit_gsheets import GSheetsConnection
 
 st.set_page_config(page_title="Portfolio Risk Tracker", layout="wide")
 st.title("📊 Portfolio Risk & Traits Tracker")
