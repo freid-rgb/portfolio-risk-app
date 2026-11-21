@@ -4,10 +4,12 @@ import numpy as np
 import yfinance as yf
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, time
+import pytz
 from scipy.optimize import brentq
 import gspread
 from google.oauth2 import service_account
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Portfolio Risk Tracker", layout="wide")
 st.title("📊 Portfolio Risk & Traits Tracker")
@@ -16,7 +18,6 @@ st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level 
 # -----------------------------
 # GOOGLE SHEETS CONNECTION
 # -----------------------------
-# Replace this with your actual Spreadsheet ID (the long string in the URL)
 SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 
 @st.cache_resource
@@ -44,7 +45,6 @@ def load_portfolio_from_sheet(sheet_id):
         st.error(f"Error loading Google Sheet: {e}")
         return pd.DataFrame()
 
-# Load the data
 df = load_portfolio_from_sheet(SPREADSHEET_ID)
 
 if df.empty:
@@ -59,47 +59,97 @@ if missing:
     st.error(f"Missing required columns in Google Sheet: {missing}")
     st.stop()
 
-# Clean data types
 df["Trade Date"] = pd.to_datetime(df["Trade Date"].astype(str), format="%Y%m%d", errors="coerce")
 for c in ["Current Price", "Purchase Price", "Quantity"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 df = df.dropna(subset=["Symbol", "Current Price", "Purchase Price", "Quantity"])
 
 # -----------------------------
+# MARKET STATUS & LIVE PRICES
+# -----------------------------
+@st.cache_data(ttl=300, show_spinner=False) # 5 minute cache to prevent rate limits
+def fetch_live_prices(tickers):
+    live_data = {}
+    for t in tickers:
+        try:
+            ticker = yf.Ticker(t)
+            # fast_info is much faster than downloading history
+            price = ticker.fast_info['last_price']
+            live_data[t] = price
+        except:
+            live_data[t] = np.nan
+    return live_data
+
+def get_market_status():
+    est = pytz.timezone('US/Eastern')
+    now = datetime.now(est)
+    # Simple check: Mon-Fri, 9:30 AM to 4:00 PM EST
+    if now.weekday() < 5 and time(9, 30) <= now.time() <= time(16, 0):
+        return True, now.strftime("%H:%M:%S EST")
+    return False, now.strftime("%H:%M:%S EST")
+
+is_market_open, current_time = get_market_status()
+
+# -----------------------------
 # Sidebar controls
 # -----------------------------
 with st.sidebar:
     st.header("Settings")
+    
+    # LIVE TRACKER TOGGLE
+    if is_market_open:
+        st.success(f"🟢 Market Open ({current_time})")
+        live_mode = st.toggle("Live Auto-Refresh (60s)", value=True)
+    else:
+        st.error(f"🔴 Market Closed ({current_time})")
+        live_mode = False
+        
     benchmark = st.text_input("Benchmark ticker", "^GSPC")
     lookback_years = st.selectbox("Return lookback (years)", [1, 2, 3], index=1)
     conf_levels = st.multiselect("VaR confidence levels", [0.95, 0.99], default=[0.95, 0.99])
     horizon_days = st.number_input("VaR horizon (trading days)", 1, 30, 1)
     fx_ticker = st.text_input("CAD→USD FX ticker", "CADUSD=X")
+    
     st.markdown("---")
-    if st.button("Refresh Data"):
+    if st.button("Force Refresh Data"):
         st.cache_data.clear()
         st.rerun()
     st.caption("Data: yfinance (unofficial). Personal use only.")
 
+# Trigger auto-refresh if live mode is on
+if live_mode:
+    st_autorefresh(interval=60000, key="live_tracker_refresh")
+
 # -----------------------------
-# Currency handling
+# Currency & Live Price Handling
 # -----------------------------
 df["Currency"] = np.where(df["Symbol"].str.endswith(".TO"), "CAD", "USD")
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_fx(ticker, start, end):
-    fx = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
-    if fx.empty:
-        return None
-    s = fx["Close"].squeeze()
-    return float(s.iloc[-1])
+@st.cache_data(ttl=300, show_spinner=False)
+def get_fx(ticker):
+    try:
+        fx = yf.Ticker(ticker)
+        return fx.fast_info['last_price']
+    except:
+        return 0.6974
 
-fx_start = "2023-01-01"
-fx_end = "2027-01-01"
-cad_usd = get_fx(fx_ticker, fx_start, fx_end) or 0.6974
+cad_usd = get_fx(fx_ticker)
 st.sidebar.metric("CAD→USD used", f"{cad_usd:.4f}")
 
-df["Current Price USD"] = np.where(df["Currency"] == "CAD", df["Current Price"] * cad_usd, df["Current Price"])
+# Fetch live prices for all symbols if market is open (or if we just want latest close)
+tickers = sorted(df["Symbol"].unique().tolist())
+live_prices = fetch_live_prices(tuple(tickers))
+
+# Replace Google Sheet prices with Live Prices (fallback to Sheet if live fails)
+def get_best_price(row):
+    live_p = live_prices.get(row["Symbol"])
+    if pd.notna(live_p) and live_p > 0:
+        return live_p
+    return row["Current Price"]
+
+df["Current Price Live"] = df.apply(get_best_price, axis=1)
+
+df["Current Price USD"] = np.where(df["Currency"] == "CAD", df["Current Price Live"] * cad_usd, df["Current Price Live"])
 df["Purchase Price USD"] = np.where(df["Currency"] == "CAD", df["Purchase Price"] * cad_usd, df["Purchase Price"])
 
 # -----------------------------
@@ -131,10 +181,9 @@ pos["Return_%"] = np.where(pos["Cost_Basis"] > 0, pos["Unrealized_PnL"] / pos["C
 # -----------------------------
 end_date = datetime(2026, 11, 19)
 start_date = end_date - pd.DateOffset(days=int((lookback_years + 0.1) * 365))
-tickers = sorted(pos["Symbol"].tolist())
 bench = benchmark.strip()
 
-@st.cache_data(ttl=3600, show_spinner="Fetching prices…")
+@st.cache_data(ttl=3600, show_spinner="Fetching historical prices…")
 def fetch_prices(tickers, bench, start, end):
     all_t = list(tickers) + [bench]
     raw = yf.download(all_t, start=start, end=end, progress=False, auto_adjust=True)
@@ -166,16 +215,13 @@ if bench not in returns.columns:
     st.stop()
 
 # -----------------------------
-# Weights over valid tickers
+# Weights, Risk, & Metrics
 # -----------------------------
 w = pos.set_index("Symbol").loc[valid, "Market_Value"]
 w = w / w.sum()
 port_ret = (returns[valid] * w).sum(axis=1)
 bench_ret = returns[bench]
 
-# -----------------------------
-# Beta & Volatility
-# -----------------------------
 cov = np.cov(port_ret, bench_ret)
 beta_port = cov[0, 1] / cov[1, 1]
 
@@ -196,14 +242,12 @@ sortino = ann_ret / downside_vol if downside_vol else np.nan
 cum = (1 + port_ret).cumprod()
 mdd = (cum / cum.cummax() - 1).min()
 
-# Benchmark Metrics (Tracking Error, Alpha, Info Ratio)
 bench_ann_ret = (1 + bench_ret).prod() ** (252 / len(bench_ret)) - 1
 active_ret = port_ret - bench_ret
 tracking_error = active_ret.std() * np.sqrt(252)
-alpha = ann_ret - (0.04 + beta_port * (bench_ann_ret - 0.04)) # Assuming 4% risk-free rate
+alpha = ann_ret - (0.04 + beta_port * (bench_ann_ret - 0.04))
 info_ratio = active_ret.mean() * 252 / tracking_error if tracking_error else np.nan
 
-# YTD Returns
 current_year = end_date.year
 ytd_prices = prices[prices.index.year == current_year]
 if not ytd_prices.empty:
@@ -215,9 +259,6 @@ else:
     bench_ytd = np.nan
     ytd_returns_series = pd.Series(dtype=float)
 
-# -----------------------------
-# VaR & Component VaR
-# -----------------------------
 def hist_var(series, conf, horizon):
     if horizon == 1:
         h = series
@@ -256,9 +297,6 @@ for t in valid:
     })
 comp_var_df = pd.DataFrame(comp_var_data).sort_values("Component VaR ($)", ascending=False)
 
-# -----------------------------
-# XIRR
-# -----------------------------
 def xnpv(rate, cashflows):
     t0 = cashflows[0][0]
     return sum(cf / (1 + rate) ** ((d - t0).days / 365.0) for d, cf in cashflows)
