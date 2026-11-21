@@ -144,7 +144,7 @@ w = w / w.sum()
 port_ret = (returns[valid] * w).sum(axis=1)
 
 # -----------------------------
-# Beta
+# Beta & Volatility
 # -----------------------------
 bench_ret = returns[bench]
 cov = np.cov(port_ret, bench_ret)
@@ -156,11 +156,32 @@ for t in valid:
     betas[t] = c[0, 1] / c[1, 1]
 beta_df = pd.DataFrame({"Symbol": list(betas.keys()), "Beta": list(betas.values())})
 
+ann_vol = port_ret.std() * np.sqrt(252)
+ann_ret = (1 + port_ret).prod() ** (252 / len(port_ret)) - 1
+sharpe = ann_ret / ann_vol if ann_vol else np.nan
+
+# NEW: Sortino Ratio (Downside Volatility only)
+downside_returns = port_ret[port_ret < 0]
+downside_vol = downside_returns.std() * np.sqrt(252)
+sortino = ann_ret / downside_vol if downside_vol else np.nan
+
+cum = (1 + port_ret).cumprod()
+mdd = (cum / cum.cummax() - 1).min()
+
+# NEW: YTD Returns (Portfolio & Individual)
+current_year = end_date.year
+ytd_prices = prices[prices.index.year == current_year]
+if not ytd_prices.empty:
+    ytd_returns_series = ytd_prices.iloc[-1] / ytd_prices.iloc[0] - 1
+    port_ytd = (ytd_returns_series[valid] * w).sum()
+else:
+    port_ytd = np.nan
+    ytd_returns_series = pd.Series(dtype=float)
+
 # -----------------------------
-# VaR (historical simulation)
+# VaR & Component VaR
 # -----------------------------
 def hist_var(series, conf, horizon):
-    # horizon-day historical returns via overlapping windows
     if horizon == 1:
         h = series
     else:
@@ -178,14 +199,29 @@ for conf in conf_levels:
     })
 var_df = pd.DataFrame(var_rows)
 
-# -----------------------------
-# Risk stats
-# -----------------------------
-ann_vol = port_ret.std() * np.sqrt(252)
-ann_ret = (1 + port_ret).prod() ** (252 / len(port_ret)) - 1
-sharpe = ann_ret / ann_vol if ann_vol else np.nan
-cum = (1 + port_ret).cumprod()
-mdd = (cum / cum.cummax() - 1).min()
+# NEW: Component VaR (assuming 95% confidence for the breakdown)
+conf_comp = conf_levels[0] if conf_levels else 0.95
+port_var_pct = hist_var(port_ret, conf_comp, horizon_days)
+total_mv = pos["Market_Value"].sum()
+
+comp_var_data = []
+for t in valid:
+    # Individual VaR scaled by weight
+    stock_var = hist_var(returns[t], conf_comp, horizon_days)
+    # Component VaR formula (approximation using correlation)
+    # For a more precise component VaR, we'd use marginal VaR, but this gives a great directional view
+    corr_with_port = np.corrcoef(returns[t], port_ret)[0,1]
+    comp_var_pct = stock_var * w[t] * corr_with_port
+    comp_var_usd = comp_var_pct * total_mv
+    
+    comp_var_data.append({
+        "Symbol": t,
+        "Stock VaR (%)": stock_var * 100,
+        "Weight (%)": w[t] * 100,
+        "Component VaR ($)": comp_var_usd,
+        "YTD Return (%)": ytd_returns_series.get(t, np.nan) * 100 if not ytd_returns_series.empty else np.nan
+    })
+comp_var_df = pd.DataFrame(comp_var_data).sort_values("Component VaR ($)", ascending=False)
 
 # -----------------------------
 # XIRR
@@ -208,7 +244,7 @@ port_xirr = xirr(cf)
 # -----------------------------
 # DISPLAY
 # -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Risk (VaR/Beta)", "Holdings", "Lot-level"])
+tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Risk & Advanced Metrics", "Holdings", "Lot-level"])
 
 with tab1:
     c1, c2, c3, c4 = st.columns(4)
@@ -231,32 +267,45 @@ with tab1:
 with tab2:
     if missing_data:
         st.warning(f"No/insufficient price history (excluded from risk): {', '.join(missing_data)}")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Portfolio Beta", f"{beta_port:.2f}")
-    c2.metric("Annualized Vol", f"{ann_vol*100:.1f}%")
-    c3.metric("Annualized Return", f"{ann_ret*100:.1f}%")
-    c4.metric("Sharpe (rf=0)", f"{sharpe:.2f}" if not np.isnan(sharpe) else "n/a")
-    st.caption(f"Max drawdown: {mdd*100:.1f}% | Lookback: {lookback_years}y | "
-               f"Benchmark: {bench} | obs: {len(port_ret)}")
+    
+    st.subheader("Performance & Risk Snapshot")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Portfolio YTD", f"{port_ytd*100:.1f}%" if not np.isnan(port_ytd) else "n/a")
+    c2.metric("Portfolio Beta", f"{beta_port:.2f}")
+    c3.metric("Annualized Vol", f"{ann_vol*100:.1f}%")
+    c4.metric("Sharpe Ratio", f"{sharpe:.2f}" if not np.isnan(sharpe) else "n/a")
+    c5.metric("Sortino Ratio", f"{sortino:.2f}" if not np.isnan(sortino) else "n/a")
+    
+    st.caption(f"Annualized Return: {ann_ret*100:.1f}% | Max drawdown: {mdd*100:.1f}% | Lookback: {lookback_years}y | Benchmark: {bench}")
 
-    st.subheader("Value at Risk (historical simulation)")
+    st.subheader("Value at Risk (Historical)")
     st.dataframe(var_df.style.format({"VaR (% of portfolio)": "{:.2f}%", "VaR ($)": "${:,.0f}"}),
                  use_container_width=True)
 
-    st.subheader("Per-holding Beta")
-    b = beta_df.merge(pos[["Symbol", "Weight_MV"]], on="Symbol").sort_values("Beta", ascending=False)
-    st.plotly_chart(px.bar(b, x="Symbol", y="Beta", color="Weight_MV",
-                           color_continuous_scale="Blues"), use_container_width=True)
-    st.dataframe(b.style.format({"Beta": "{:.2f}", "Weight_MV": "{:.1%}"}), use_container_width=True)
+    st.subheader("Component VaR & YTD Breakdown")
+    st.write(f"*This shows how much of your total portfolio risk (at {int(conf_comp*100)}% confidence) is coming from each specific stock.*")
+    st.dataframe(comp_var_df.style.format({
+        "Stock VaR (%)": "{:.2f}%",
+        "Weight (%)": "{:.1f}%",
+        "Component VaR ($)": "${:,.0f}",
+        "YTD Return (%)": "{:.1f}%"
+    }), use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Per-holding Beta")
+        b = beta_df.merge(pos[["Symbol", "Weight_MV"]], on="Symbol").sort_values("Beta", ascending=False)
+        st.plotly_chart(px.bar(b, x="Symbol", y="Beta", color="Weight_MV",
+                               color_continuous_scale="Blues"), use_container_width=True)
+    with col2:
+        st.subheader("Portfolio return distribution")
+        st.plotly_chart(px.histogram(port_ret * 100, nbins=80, labels={"value": "Daily return (%)"}),
+                        use_container_width=True)
 
     st.subheader("Correlation matrix (daily returns)")
     corr = returns[valid].corr()
     st.plotly_chart(px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r",
                               zmin=-1, zmax=1), use_container_width=True)
-
-    st.subheader("Portfolio return distribution")
-    st.plotly_chart(px.histogram(port_ret * 100, nbins=80, labels={"value": "Daily return (%)"}),
-                    use_container_width=True)
 
 with tab3:
     show = pos.sort_values("Market_Value", ascending=False).copy()
