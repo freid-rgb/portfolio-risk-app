@@ -8,6 +8,7 @@ from datetime import datetime, time
 import pytz
 from scipy.optimize import brentq
 import gspread
+from gspread_dataframe import set_with_dataframe
 from google.oauth2 import service_account
 from streamlit_autorefresh import st_autorefresh
 
@@ -16,18 +17,19 @@ st.title("📊 Portfolio Risk & Traits Tracker")
 st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level P&L")
 
 # -----------------------------
-# GOOGLE SHEETS CONNECTION
+# GOOGLE SHEETS CONNECTION (READ/WRITE)
 # -----------------------------
 SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 
 @st.cache_resource
 def get_gspread_client():
     creds_dict = dict(st.secrets["gcp_service_account"])
+    # UPGRADED SCOPES FOR READ/WRITE
     creds = service_account.Credentials.from_service_account_info(
         creds_dict,
         scopes=[
-            "https://www.googleapis.com/auth/spreadsheets.readonly",
-            "https://www.googleapis.com/auth/drive.readonly"
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
         ]
     )
     client = gspread.authorize(creds)
@@ -45,6 +47,7 @@ def load_portfolio_from_sheet(sheet_id):
         st.error(f"Error loading Google Sheet: {e}")
         return pd.DataFrame()
 
+# Load the data
 df = load_portfolio_from_sheet(SPREADSHEET_ID)
 
 if df.empty:
@@ -52,7 +55,6 @@ if df.empty:
     st.stop()
 
 df.columns = [c.strip() for c in df.columns]
-
 required = ["Symbol", "Current Price", "Trade Date", "Purchase Price", "Quantity"]
 missing = [c for c in required if c not in df.columns]
 if missing:
@@ -67,13 +69,12 @@ df = df.dropna(subset=["Symbol", "Current Price", "Purchase Price", "Quantity"])
 # -----------------------------
 # MARKET STATUS & LIVE PRICES
 # -----------------------------
-@st.cache_data(ttl=300, show_spinner=False) # 5 minute cache to prevent rate limits
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_live_prices(tickers):
     live_data = {}
     for t in tickers:
         try:
             ticker = yf.Ticker(t)
-            # fast_info is much faster than downloading history
             price = ticker.fast_info['last_price']
             live_data[t] = price
         except:
@@ -83,7 +84,6 @@ def fetch_live_prices(tickers):
 def get_market_status():
     est = pytz.timezone('US/Eastern')
     now = datetime.now(est)
-    # Simple check: Mon-Fri, 9:30 AM to 4:00 PM EST
     if now.weekday() < 5 and time(9, 30) <= now.time() <= time(16, 0):
         return True, now.strftime("%H:%M:%S EST")
     return False, now.strftime("%H:%M:%S EST")
@@ -95,8 +95,6 @@ is_market_open, current_time = get_market_status()
 # -----------------------------
 with st.sidebar:
     st.header("Settings")
-    
-    # LIVE TRACKER TOGGLE
     if is_market_open:
         st.success(f"🟢 Market Open ({current_time})")
         live_mode = st.toggle("Live Auto-Refresh (60s)", value=True)
@@ -109,14 +107,11 @@ with st.sidebar:
     conf_levels = st.multiselect("VaR confidence levels", [0.95, 0.99], default=[0.95, 0.99])
     horizon_days = st.number_input("VaR horizon (trading days)", 1, 30, 1)
     fx_ticker = st.text_input("CAD→USD FX ticker", "CADUSD=X")
-    
     st.markdown("---")
     if st.button("Force Refresh Data"):
         st.cache_data.clear()
         st.rerun()
-    st.caption("Data: yfinance (unofficial). Personal use only.")
 
-# Trigger auto-refresh if live mode is on
 if live_mode:
     st_autorefresh(interval=60000, key="live_tracker_refresh")
 
@@ -136,11 +131,9 @@ def get_fx(ticker):
 cad_usd = get_fx(fx_ticker)
 st.sidebar.metric("CAD→USD used", f"{cad_usd:.4f}")
 
-# Fetch live prices for all symbols if market is open (or if we just want latest close)
 tickers = sorted(df["Symbol"].unique().tolist())
 live_prices = fetch_live_prices(tuple(tickers))
 
-# Replace Google Sheet prices with Live Prices (fallback to Sheet if live fails)
 def get_best_price(row):
     live_p = live_prices.get(row["Symbol"])
     if pd.notna(live_p) and live_p > 0:
@@ -148,7 +141,6 @@ def get_best_price(row):
     return row["Current Price"]
 
 df["Current Price Live"] = df.apply(get_best_price, axis=1)
-
 df["Current Price USD"] = np.where(df["Currency"] == "CAD", df["Current Price Live"] * cad_usd, df["Current Price Live"])
 df["Purchase Price USD"] = np.where(df["Currency"] == "CAD", df["Purchase Price"] * cad_usd, df["Purchase Price"])
 
@@ -157,6 +149,26 @@ df["Purchase Price USD"] = np.where(df["Currency"] == "CAD", df["Purchase Price"
 # -----------------------------
 df["Market Value"] = df["Current Price USD"] * df["Quantity"]
 df["Cost Basis"] = df["Purchase Price USD"] * df["Quantity"]
+
+# NEW: Calculate Daily P&L (Current Price - Previous Close) * Quantity
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_prev_closes(tickers):
+    prev_closes = {}
+    for t in tickers:
+        try:
+            ticker = yf.Ticker(t)
+            prev_closes[t] = ticker.fast_info['previous_close']
+        except:
+            prev_closes[t] = np.nan
+    return prev_closes
+
+prev_closes = fetch_prev_closes(tuple(tickers))
+df["Prev Close"] = df["Symbol"].map(prev_closes)
+df["Prev Close USD"] = np.where(df["Currency"] == "CAD", df["Prev Close"] * cad_usd, df["Prev Close"])
+df["Daily P&L"] = (df["Current Price USD"] - df["Prev Close USD"]) * df["Quantity"]
+
+daily_pnl = df["Daily P&L"].sum()
+daily_pnl_pct = (daily_pnl / df["Market Value"].sum()) * 100 if df["Market Value"].sum() else 0
 
 pos = df.groupby("Symbol").agg(
     Quantity=("Quantity", "sum"),
@@ -315,11 +327,11 @@ port_xirr = xirr(cf)
 # -----------------------------
 # DISPLAY
 # -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level", "Add Trade"])
 
 with tab1:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Market Value (USD)", f"${pos['Market_Value'].sum():,.0f}")
+    c1.metric("Total Market Value (USD)", f"${pos['Market_Value'].sum():,.0f}", delta=f"${daily_pnl:,.0f} Today")
     c2.metric("Total Cost Basis (USD)", f"${pos['Cost_Basis'].sum():,.0f}")
     c3.metric("Unrealized P&L", f"${pos['Unrealized_PnL'].sum():,.0f}",
               f"{pos['Unrealized_PnL'].sum()/pos['Cost_Basis'].sum()*100:.1f}%")
@@ -346,13 +358,12 @@ with tab2:
     c2.metric("Portfolio Beta", f"{beta_port:.2f}")
     c3.metric("Sharpe Ratio", f"{sharpe:.2f}" if not np.isnan(sharpe) else "n/a")
     c4.metric("Sortino Ratio", f"{sortino:.2f}" if not np.isnan(sortino) else "n/a")
-    c5.metric("Info Ratio", f"{info_ratio:.2f}" if not np.isnan(info_ratio) else "n/a", 
-              help="Excess return divided by tracking error. > 0.5 is good, > 1.0 is excellent.")
+    c5.metric("Info Ratio", f"{info_ratio:.2f}" if not np.isnan(info_ratio) else "n/a")
 
     st.subheader("Benchmark Comparison")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Tracking Error", f"{tracking_error*100:.1f}%", help="How much your portfolio deviates from the benchmark. Lower = closer to index.")
-    c2.metric("Portfolio Alpha", f"{alpha*100:.1f}%", help="Excess return above what is predicted by Beta.")
+    c1.metric("Tracking Error", f"{tracking_error*100:.1f}%")
+    c2.metric("Portfolio Alpha", f"{alpha*100:.1f}%")
     c3.metric("Benchmark Ann. Return", f"{bench_ann_ret*100:.1f}%")
 
     st.subheader("Growth of $10,000 (Portfolio vs Benchmark)")
@@ -369,7 +380,6 @@ with tab2:
                  use_container_width=True)
 
     st.subheader("Component VaR & YTD Breakdown")
-    st.write(f"*This shows how much of your total portfolio risk (at {int(conf_comp*100)}% confidence) is coming from each specific stock.*")
     st.dataframe(comp_var_df.style.format({
         "Stock VaR (%)": "{:.2f}%",
         "Weight (%)": "{:.1f}%",
@@ -416,3 +426,60 @@ with tab4:
                      "Lot P&L": "${:,.2f}", "Lot Return %": "{:.1f}%",
                  }), use_container_width=True)
     st.download_button("Download lot-level CSV", lots.to_csv(index=False), "lots.csv")
+
+with tab5:
+    st.subheader("Add a New Trade")
+    st.write("Fill out the form below to append a trade directly to your Google Sheet.")
+    
+    with st.form("add_trade_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_symbol = st.text_input("Symbol (e.g., AAPL or CSU.TO)").upper().strip()
+            new_qty = st.number_input("Quantity", min_value=0.0001, step=1.0, format="%.4f")
+        with col2:
+            new_price = st.number_input("Price per Share", min_value=0.01, step=1.0, format="%.2f")
+            new_date = st.date_input("Trade Date", datetime.now())
+            
+        submitted = st.form_submit_button("Submit Trade")
+        
+        if submitted:
+            if not new_symbol:
+                st.error("Please enter a symbol.")
+            else:
+                # Prepare the new row
+                new_row = {
+                    "Symbol": new_symbol,
+                    "Current Price": new_price,
+                    "Date": datetime.now().strftime("%Y/%m/%d"),
+                    "Time": "16:00 EST",
+                    "Change": 0,
+                    "Open": 0,
+                    "High": 0,
+                    "Low": 0,
+                    "Volume": 0,
+                    "Trade Date": new_date.strftime("%Y%m%d"),
+                    "Purchase Price": new_price,
+                    "Quantity": new_qty,
+                    "Commission": 0,
+                    "High Limit": "",
+                    "Low Limit": "",
+                    "Comment": "Added via App",
+                    "Transaction Type": "BUY"
+                }
+                
+                try:
+                    client = get_gspread_client()
+                    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+                    
+                    # Get existing data to append correctly
+                    existing_df = pd.DataFrame(sheet.get_all_records())
+                    existing_df = pd.concat([existing_df, pd.DataFrame([new_row])], ignore_index=True)
+                    
+                    # Write it back
+                    set_with_dataframe(sheet, existing_df)
+                    
+                    st.success(f"Successfully added {new_qty} shares of {new_symbol}!")
+                    st.cache_data.clear() # Clear cache so it reloads immediately
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to add trade: {e}")
