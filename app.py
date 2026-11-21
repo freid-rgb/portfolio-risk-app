@@ -19,7 +19,7 @@ st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level 
 # -----------------------------
 # GOOGLE SHEETS CONNECTION (READ/WRITE)
 # -----------------------------
-SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw" # <--- MAKE SURE THIS IS HERE
+SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjv" # <--- MAKE SURE THIS IS HERE
 
 @st.cache_resource
 def get_gspread_client():
@@ -44,19 +44,26 @@ def load_data_from_sheet(sheet_id):
         sheet1 = sheet.sheet1
         df_port = pd.DataFrame(sheet1.get_all_records())
         
-        # Load Dividends (Dividends tab)
+        # Load Dividends
         try:
             sheet_div = sheet.worksheet("Dividends")
             df_div = pd.DataFrame(sheet_div.get_all_records())
         except:
             df_div = pd.DataFrame(columns=["Date", "Symbol", "Dividend per Share", "Total Cash", "Currency"])
             
-        return df_port, df_div
+        # Load Watchlist
+        try:
+            sheet_watch = sheet.worksheet("Watchlist")
+            df_watch = pd.DataFrame(sheet_watch.get_all_records())
+        except:
+            df_watch = pd.DataFrame(columns=["Symbol"])
+            
+        return df_port, df_div, df_watch
     except Exception as e:
         st.error(f"Error loading Google Sheet: {e}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-df, df_div = load_data_from_sheet(SPREADSHEET_ID)
+df, df_div, df_watch = load_data_from_sheet(SPREADSHEET_ID)
 
 if df.empty:
     st.warning("No portfolio data found.")
@@ -216,7 +223,6 @@ if dividends_updated:
     st.toast("🎉 New dividends detected and logged to your sheet!")
     df_div = pd.DataFrame(get_gspread_client().open_by_key(SPREADSHEET_ID).worksheet("Dividends").get_all_records())
 
-# Process Dividends Data
 if not df_div.empty:
     df_div["Total Cash"] = pd.to_numeric(df_div["Total Cash"], errors="coerce").fillna(0)
     df_div["Total Cash USD"] = np.where(df_div["Currency"] == "CAD", df_div["Total Cash"] * cad_usd, df_div["Total Cash"])
@@ -405,7 +411,7 @@ port_xirr = xirr(cf)
 # -----------------------------
 # DISPLAY
 # -----------------------------
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level", "Add Trade", "Dividend History"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level", "Add Trade", "Dividend History", "Watchlist"])
 
 with tab1:
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -562,19 +568,16 @@ with tab6:
     if df_div.empty:
         st.info("No dividends logged yet. As your companies pay out (and you've owned them for the ex-dividend date), they will automatically appear here!")
     else:
-        # Top metric
         c1, c2 = st.columns(2)
         c1.metric("Total Dividends Collected (USD)", f"${total_div_usd:,.2f}")
         c2.metric("Total Payouts Logged", len(df_div))
         
-        # Bar chart of dividends by symbol
         st.write("### Total Cash by Security (USD)")
         div_by_symbol = df_div.groupby("Symbol")["Total Cash USD"].sum().reset_index().sort_values("Total Cash USD", ascending=False)
         fig_div = px.bar(div_by_symbol, x="Symbol", y="Total Cash USD", text_auto='.2s', color="Symbol")
         fig_div.update_layout(showlegend=False, yaxis_title="Cash Received (USD)")
         st.plotly_chart(fig_div, use_container_width=True)
         
-        # Data table
         st.write("### Dividend Log")
         display_div = df_div.sort_values("Date", ascending=False).copy()
         st.dataframe(display_div.style.format({
@@ -582,3 +585,87 @@ with tab6:
             "Total Cash": "${:,.2f}",
             "Total Cash USD": "${:,.2f}"
         }), use_container_width=True)
+
+with tab7:
+    st.subheader("Watchlist Tracker")
+    
+    # Form to add to watchlist
+    with st.form("add_watchlist_form", clear_on_submit=True):
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            new_watch_symbol = st.text_input("Add Ticker to Watchlist").upper().strip()
+        with col2:
+            st.write("")
+            st.write("")
+            submit_watch = st.form_submit_button("Add Ticker")
+            
+        if submit_watch and new_watch_symbol:
+            try:
+                client = get_gspread_client()
+                sheet = client.open_by_key(SPREADSHEET_ID)
+                try:
+                    sheet_watch = sheet.worksheet("Watchlist")
+                except:
+                    st.error("Could not find 'Watchlist' tab in your Google Sheet. Please create it and add 'Symbol' to cell A1.")
+                    st.stop()
+                    
+                existing_watch = pd.DataFrame(sheet_watch.get_all_records())
+                if new_watch_symbol not in existing_watch["Symbol"].values:
+                    new_watch_row = pd.DataFrame([{"Symbol": new_watch_symbol}])
+                    existing_watch = pd.concat([existing_watch, new_watch_row], ignore_index=True)
+                    set_with_dataframe(sheet_watch, existing_watch)
+                    st.success(f"Added {new_watch_symbol} to Watchlist!")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.warning(f"{new_watch_symbol} is already on the watchlist.")
+            except Exception as e:
+                st.error(f"Error updating watchlist: {e}")
+
+    if df_watch.empty:
+        st.info("Watchlist is empty. Add a ticker above!")
+    else:
+        # Fetch data for all watchlist tickers
+        watch_tickers = df_watch["Symbol"].tolist()
+        
+        @st.cache_data(ttl=300, show_spinner="Fetching watchlist data...")
+        def fetch_watchlist_data(tickers):
+            data = []
+            for t in tickers:
+                try:
+                    ticker = yf.Ticker(t)
+                    info = ticker.fast_info
+                    
+                    # YTD Return calculation
+                    hist = ticker.history(period="ytd")
+                    if not hist.empty:
+                        ytd_ret = (hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100
+                    else:
+                        ytd_ret = np.nan
+                        
+                    # Currency
+                    curr = "CAD" if t.endswith(".TO") else "USD"
+                    
+                    data.append({
+                        "Symbol": t,
+                        "Price": info.get('last_price', np.nan),
+                        "Daily Change (%)": (info.get('last_price', 0) / info.get('previous_close', 1) - 1) * 100,
+                        "YTD Return (%)": ytd_ret,
+                        "52W High": info.get('year_high', np.nan),
+                        "52W Low": info.get('year_low', np.nan),
+                        "Currency": curr
+                    })
+                except:
+                    continue
+            return pd.DataFrame(data)
+            
+        watch_data = fetch_watchlist_data(tuple(watch_tickers))
+        
+        if not watch_data.empty:
+            st.dataframe(watch_data.style.format({
+                "Price": "{:.2f}",
+                "Daily Change (%)": "{:+.2f}%",
+                "YTD Return (%)": "{:+.2f}%",
+                "52W High": "{:.2f}",
+                "52W Low": "{:.2f}"
+            }), use_container_width=True)
