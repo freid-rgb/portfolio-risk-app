@@ -19,7 +19,7 @@ st.caption("VaR · Beta · Volatility · Correlation · Cost Basis · Lot-level 
 # -----------------------------
 # GOOGLE SHEETS CONNECTION (READ/WRITE)
 # -----------------------------
-SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
+SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw" # <--- MAKE SURE THIS IS HERE
 
 @st.cache_resource
 def get_gspread_client():
@@ -164,7 +164,7 @@ def check_and_update_dividends(sheet_id, tickers):
         try:
             sheet_div = sheet.worksheet("Dividends")
         except:
-            return None # Tab doesn't exist
+            return None 
             
         existing_divs = pd.DataFrame(sheet_div.get_all_records())
         if existing_divs.empty:
@@ -179,21 +179,17 @@ def check_and_update_dividends(sheet_id, tickers):
                 if divs.empty:
                     continue
                 
-                # Get most recent dividend
                 last_div_date = divs.index[-1].strftime("%Y-%m-%d")
                 last_div_amt = float(divs.iloc[-1])
                 
-                # Check if we already logged this payout
                 already_logged = existing_divs[
                     (existing_divs["Symbol"] == t) & 
                     (existing_divs["Date"] == last_div_date)
                 ]
                 
-                # If not logged, and it happened in the last 30 days, log it
                 if already_logged.empty:
                     days_ago = (datetime.now() - divs.index[-1].replace(tzinfo=None)).days
                     if 0 <= days_ago <= 30:
-                        # Calculate total cash based on current shares
                         total_shares = df[df["Symbol"] == t]["Quantity"].sum()
                         if total_shares > 0:
                             new_rows.append({
@@ -206,7 +202,6 @@ def check_and_update_dividends(sheet_id, tickers):
             except:
                 continue
                 
-        # Write new dividends to sheet
         if new_rows:
             existing_df = pd.concat([existing_divs, pd.DataFrame(new_rows)], ignore_index=True)
             set_with_dataframe(sheet_div, existing_df)
@@ -216,21 +211,18 @@ def check_and_update_dividends(sheet_id, tickers):
         st.sidebar.error(f"Dividend check failed: {e}")
         return False
 
-# Run the check (only writes if new dividends found)
 dividends_updated = check_and_update_dividends(SPREADSHEET_ID, tuple(tickers))
 if dividends_updated:
     st.toast("🎉 New dividends detected and logged to your sheet!")
     df_div = pd.DataFrame(get_gspread_client().open_by_key(SPREADSHEET_ID).worksheet("Dividends").get_all_records())
 
-# Calculate Total Dividends USD
-total_div_usd = 0
+# Process Dividends Data
 if not df_div.empty:
     df_div["Total Cash"] = pd.to_numeric(df_div["Total Cash"], errors="coerce").fillna(0)
-    total_div_usd = np.where(
-        df_div["Currency"] == "CAD", 
-        df_div["Total Cash"] * cad_usd, 
-        df_div["Total Cash"]
-    ).sum()
+    df_div["Total Cash USD"] = np.where(df_div["Currency"] == "CAD", df_div["Total Cash"] * cad_usd, df_div["Total Cash"])
+    total_div_usd = df_div["Total Cash USD"].sum()
+else:
+    total_div_usd = 0
 
 # -----------------------------
 # Position aggregation
@@ -406,14 +398,14 @@ def xirr(cashflows):
         return np.nan
 
 cf = [(d, -amt) for d, amt in zip(df["Trade Date"], df["Cost Basis"]) if pd.notna(d)]
-cf.append((end_date, df["Market Value"].sum() + total_div_usd)) # Include dividends in final cashflow
+cf.append((end_date, df["Market Value"].sum() + total_div_usd)) 
 cf = sorted(cf, key=lambda x: x[0])
 port_xirr = xirr(cf)
 
 # -----------------------------
 # DISPLAY
 # -----------------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level", "Add Trade"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Overview", "Risk & Benchmark Metrics", "Holdings", "Lot-level", "Add Trade", "Dividend History"])
 
 with tab1:
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -563,3 +555,30 @@ with tab5:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to add trade: {e}")
+
+with tab6:
+    st.subheader("Dividend History & Breakdown")
+    
+    if df_div.empty:
+        st.info("No dividends logged yet. As your companies pay out (and you've owned them for the ex-dividend date), they will automatically appear here!")
+    else:
+        # Top metric
+        c1, c2 = st.columns(2)
+        c1.metric("Total Dividends Collected (USD)", f"${total_div_usd:,.2f}")
+        c2.metric("Total Payouts Logged", len(df_div))
+        
+        # Bar chart of dividends by symbol
+        st.write("### Total Cash by Security (USD)")
+        div_by_symbol = df_div.groupby("Symbol")["Total Cash USD"].sum().reset_index().sort_values("Total Cash USD", ascending=False)
+        fig_div = px.bar(div_by_symbol, x="Symbol", y="Total Cash USD", text_auto='.2s', color="Symbol")
+        fig_div.update_layout(showlegend=False, yaxis_title="Cash Received (USD)")
+        st.plotly_chart(fig_div, use_container_width=True)
+        
+        # Data table
+        st.write("### Dividend Log")
+        display_div = df_div.sort_values("Date", ascending=False).copy()
+        st.dataframe(display_div.style.format({
+            "Dividend per Share": "{:.4f}",
+            "Total Cash": "${:,.2f}",
+            "Total Cash USD": "${:,.2f}"
+        }), use_container_width=True)
