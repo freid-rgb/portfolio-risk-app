@@ -195,7 +195,7 @@ df["Daily P&L"] = (df["Current Price USD"] - df["Prev Close USD"]) * df["Quantit
 daily_pnl = df["Daily P&L"].sum()
 
 # -----------------------------
-# TIME PERIOD RETURNS & CONTRIBUTIONS
+# TIME PERIOD RETURNS
 # -----------------------------
 today = datetime.now()
 start_of_month = today.replace(day=1)
@@ -273,7 +273,7 @@ port_mtd_ret = pos["MTD Contrib %"].sum()
 port_qtd_ret = pos["QTD Contrib %"].sum()
 
 # -----------------------------
-# RISK METRICS (VaR, Beta)
+# RISK METRICS
 # -----------------------------
 end_date = datetime.now()
 start_date = end_date - pd.DateOffset(days=int((lookback_years + 0.1) * 365))
@@ -387,7 +387,7 @@ port_xirr = xirr(cf)
 # -----------------------------
 # DISPLAY
 # -----------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Overview", "Risk & Benchmark", "Holdings", "Lot-level", "Trade", "Dividends", "Watchlist"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Overview", "Risk & Benchmark", "Allocation", "Holdings", "Lot-level", "Trade", "Dividends", "Watchlist"])
 
 with tab1:
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -398,39 +398,23 @@ with tab1:
     c5.metric("Portfolio XIRR", f"{port_xirr*100:.1f}%" if not np.isnan(port_xirr) else "n/a")
 
     st.subheader("Returns & Contribution by Time Period")
-    
     rc1, rc2, rc3 = st.columns(3)
     rc1.metric("Portfolio Daily Return", f"{port_daily_ret:+.2f}%")
     rc2.metric("Portfolio Month-to-Date", f"{port_mtd_ret:+.2f}%")
     rc3.metric("Portfolio Quarter-to-Date", f"{port_qtd_ret:+.2f}%")
     
     period_table = pos[["Symbol", "Weight_MV", "Daily %", "Daily Contrib %", "Daily $ Impact", "MTD %", "MTD Contrib %", "MTD $ Impact", "QTD %", "QTD Contrib %", "QTD $ Impact"]].sort_values("Weight_MV", ascending=False).copy()
-    
-    period_table = period_table.rename(columns={
-        "Weight_MV": "Weight",
-        "Daily %": "D %",
-        "Daily Contrib %": "D Contrib",
-        "Daily $ Impact": "D $ Impact",
-        "MTD %": "MTD %",
-        "MTD Contrib %": "MTD Contrib",
-        "MTD $ Impact": "MTD $ Impact",
-        "QTD %": "QTD %",
-        "QTD Contrib %": "QTD Contrib",
-        "QTD $ Impact": "QTD $ Impact"
-    })
-
+    period_table = period_table.rename(columns={"Weight_MV": "Weight", "Daily %": "D %", "Daily Contrib %": "D Contrib", "Daily $ Impact": "D $ Impact", "MTD %": "MTD %", "MTD Contrib %": "MTD Contrib", "MTD $ Impact": "MTD $ Impact", "QTD %": "QTD %", "QTD Contrib %": "QTD Contrib", "QTD $ Impact": "QTD $ Impact"})
     period_style = period_table.style.format({
         "Weight": "{:.1%}", 
         "D %": "{:+.2f}%", "D Contrib": "{:+.2f}%", "D $ Impact": "${:+,.2f}",
         "MTD %": "{:+.2f}%", "MTD Contrib": "{:+.2f}%", "MTD $ Impact": "${:+,.2f}",
         "QTD %": "{:+.2f}%", "QTD Contrib": "{:+.2f}%", "QTD $ Impact": "${:+,.2f}"
     }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["D %", "D Contrib", "D $ Impact", "MTD %", "MTD Contrib", "MTD $ Impact", "QTD %", "QTD Contrib", "QTD $ Impact"])
-    
     st.dataframe(period_style, use_container_width=True)
 
     st.subheader("Daily Contribution to Return ($)")
     waterfall_df = pos[["Symbol", "Daily $ Impact"]].sort_values("Daily $ Impact", ascending=False)
-    
     fig_waterfall = go.Figure(go.Waterfall(
         name="Daily P&L", orientation="v",
         measure=["relative"] * len(waterfall_df) + ["total"],
@@ -445,10 +429,6 @@ with tab1:
     ))
     fig_waterfall.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#EBD5B3"), showlegend=False)
     st.plotly_chart(fig_waterfall, use_container_width=True)
-
-    st.subheader("Allocation by market value")
-    fig = px.pie(pos, names="Symbol", values="Market_Value", hole=0.4, color_discrete_sequence=px.colors.sequential.Oranges_r)
-    st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     if missing_data: st.warning(f"No/insufficient price history (excluded from risk): {', '.join(missing_data)}")
@@ -499,6 +479,79 @@ with tab2:
     st.plotly_chart(px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="Oranges", zmin=-1, zmax=1), use_container_width=True)
 
 with tab3:
+    st.subheader("Portfolio Allocation")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Donut Chart
+        fig_pie = px.pie(pos, names="Symbol", values="Market_Value", hole=0.5, color_discrete_sequence=px.colors.sequential.Oranges_r)
+        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+        fig_pie.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#EBD5B3"))
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with col2:
+        # Horizontal Bar Chart
+        pos_sorted = pos.sort_values("Weight_MV", ascending=True)
+        fig_bar = px.bar(pos_sorted, x="Weight_MV", y="Symbol", orientation='h', color="Weight_MV", color_continuous_scale="Oranges")
+        fig_bar.update_layout(xaxis_title="Portfolio Weight", yaxis_title="", coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#EBD5B3"))
+        fig_bar.update_xaxes(tickformat=".0%")
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Target Allocation & Rebalancing")
+    st.write("Type your Target % below. The app will calculate exactly how many shares you need to Buy or Sell to hit your goal.")
+    
+    # Target Rebalancing Logic
+    # We use st.data_editor to let the user type in target percentages
+    rebal_df = pos[["Symbol", "Quantity", "Current Price Live", "Market_Value", "Weight_MV"]].copy()
+    rebal_df["Target %"] = 0.0 # Default to 0
+    rebal_df = rebal_df.rename(columns={"Weight_MV": "Actual %"})
+    
+    edited_df = st.data_editor(
+        rebal_df,
+        column_config={
+            "Symbol": st.column_config.TextColumn("Symbol", disabled=True),
+            "Quantity": st.column_config.NumberColumn("Current Shares", disabled=True, format="%.2f"),
+            "Current Price Live": st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
+            "Market_Value": st.column_config.NumberColumn("Current Value", disabled=True, format="$%.2f"),
+            "Actual %": st.column_config.NumberColumn("Actual %", disabled=True, format="%.2f%%"),
+            "Target %": st.column_config.NumberColumn("Target % (Type Here)", min_value=0.0, max_value=100.0, format="%.2f%%")
+        },
+        hide_index=True,
+        use_container_width=True,
+        key="rebalance_editor"
+    )
+    
+    # Calculate shares to trade
+    total_target = edited_df["Target %"].sum()
+    if total_target > 100.0:
+        st.warning(f"Your targets sum to {total_target:.2f}%. Please adjust so they equal 100% or less.")
+    
+    # Calculate dollar target and shares to buy/sell
+    edited_df["Target $"] = (edited_df["Target %"] / 100) * total_port_val
+    edited_df["$ To Trade"] = edited_df["Target $"] - edited_df["Market_Value"]
+    edited_df["Shares To Trade"] = edited_df["$ To Trade"] / edited_df["Current Price Live"]
+    
+    # Display action items
+    actions = edited_df[abs(edited_df["Shares To Trade"]) > 0.01].copy()
+    if not actions.empty:
+        actions["Action"] = np.where(actions["Shares To Trade"] > 0, "BUY", "SELL")
+        actions["Shares To Trade"] = actions["Shares To Trade"].abs()
+        
+        st.write("### Action Items to Reach Target")
+        
+        action_style = actions[["Action", "Symbol", "Shares To Trade", "Current Price Live", "$ To Trade"]].style.format({
+            "Shares To Trade": "{:.2f}",
+            "Current Price Live": "${:.2f}",
+            "$ To Trade": "${:+,.2f}"
+        }).map(lambda x: 'color: #00FFAA' if x == "BUY" else 'color: #FF4B4B' if x == "SELL" else '', subset=["Action"])
+        
+        st.dataframe(action_style, use_container_width=True, hide_index=True)
+    else:
+        st.info("Enter Target % above to see your rebalancing trades.")
+
+with tab4:
     show = pos.sort_values("Market_Value", ascending=False).copy()
     show_style = show.style.format({
         "Quantity": "{:.4f}", "Market_Value": "${:,.2f}", "Cost_Basis": "${:,.2f}",
@@ -507,7 +560,7 @@ with tab3:
     }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Unrealized_PnL", "Return_%"])
     st.dataframe(show_style, use_container_width=True)
 
-with tab4:
+with tab5:
     lots = df.copy().sort_values(["Symbol", "Trade Date"])
     lots["Days Held"] = (end_date - lots["Trade Date"]).dt.days
     lots["Lot P&L"] = lots["Market Value"] - lots["Cost Basis"]
@@ -524,7 +577,7 @@ with tab4:
     st.dataframe(lots_style, use_container_width=True)
     st.download_button("Download lot-level CSV", lots.to_csv(index=False), "lots.csv")
 
-with tab5:
+with tab6:
     st.subheader("Add a New Trade")
     with st.form("add_trade_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -556,7 +609,7 @@ with tab5:
                     st.rerun()
                 except Exception as e: st.error(f"Failed to add trade: {e}")
 
-with tab6:
+with tab7:
     st.subheader("Dividend History & Breakdown")
     if df_div.empty: st.info("No dividends logged yet.")
     else:
@@ -574,7 +627,7 @@ with tab6:
             "Dividend per Share": "{:.4f}", "Total Cash": "${:,.2f}", "Total Cash USD": "${:,.2f}"
         }), use_container_width=True)
 
-with tab7:
+with tab8:
     st.subheader("Watchlist Tracker")
     with st.form("add_watchlist_form", clear_on_submit=True):
         col1, col2 = st.columns([3, 1])
@@ -612,45 +665,28 @@ with tab7:
             for t in tickers:
                 try:
                     ticker = yf.Ticker(t)
-                    
-                    # FIXED: Pulling actual historical data instead of fast_info for accuracy
                     hist_1y = ticker.history(period="1y")
                     hist_ytd = ticker.history(period="ytd")
                     hist_5d = ticker.history(period="5d")
                     
-                    if hist_1y.empty or hist_5d.empty:
-                        continue
-                        
+                    if hist_1y.empty or hist_5d.empty: continue
                     curr_price = hist_5d['Close'].iloc[-1]
                     
-                    # Daily Change (Today vs Yesterday)
                     prev_close = hist_5d['Close'].iloc[-2] if len(hist_5d) >= 2 else curr_price
                     daily_change = ((curr_price / prev_close) - 1) * 100
                     
-                    # YTD Return
-                    if not hist_ytd.empty:
-                        ytd_start = hist_ytd['Close'].iloc[0]
-                        ytd_ret = ((curr_price / ytd_start) - 1) * 100
-                    else:
-                        ytd_ret = np.nan
-                        
-                    # 52W High/Low
+                    ytd_ret = ((curr_price / hist_ytd['Close'].iloc[0]) - 1) * 100 if not hist_ytd.empty else np.nan
+                    
                     high_52w = hist_1y['High'].max()
                     low_52w = hist_1y['Low'].min()
                     
                     curr = "CAD" if t.endswith(".TO") else "USD"
                     
                     data.append({
-                        "Symbol": t, 
-                        "Price": curr_price,
-                        "Daily Change (%)": daily_change,
-                        "YTD Return (%)": ytd_ret, 
-                        "52W High": high_52w,
-                        "52W Low": low_52w, 
-                        "Currency": curr
+                        "Symbol": t, "Price": curr_price, "Daily Change (%)": daily_change,
+                        "YTD Return (%)": ytd_ret, "52W High": high_52w, "52W Low": low_52w, "Currency": curr
                     })
-                except:
-                    continue
+                except: continue
             return pd.DataFrame(data)
             
         watch_data = fetch_watchlist_data(tuple(watch_tickers))
