@@ -15,7 +15,7 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Arrakis Portfolio", layout="wide")
 
 # -------------------------------------------------------------------
-# ARRAKIS CUSTOM CSS (Glowing borders, spice accents, serif fonts)
+# ARRAKIS CUSTOM CSS
 # -------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -32,9 +32,6 @@ st.markdown("""
 st.title("🏜️ Arrakis Portfolio Terminal")
 st.caption("Spice · VaR · Beta · Volatility · Cost Basis · Lot-level P&L")
 
-# -----------------------------
-# GOOGLE SHEETS CONNECTION (READ/WRITE)
-# -----------------------------
 SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 
 @st.cache_resource
@@ -44,22 +41,18 @@ def get_gspread_client():
         creds_dict,
         scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     )
-    client = gspread.authorize(creds)
-    return client
+    return gspread.authorize(creds)
 
-@st.cache_data(ttl=300, show_spinner="Loading portfolio from the deep desert...")
+@st.cache_data(ttl=300, show_spinner="Loading portfolio...")
 def load_data_from_sheet(sheet_id):
     try:
         client = get_gspread_client()
         sheet = client.open_by_key(sheet_id)
         df_port = pd.DataFrame(sheet.sheet1.get_all_records())
-        
         try: df_div = pd.DataFrame(sheet.worksheet("Dividends").get_all_records())
         except: df_div = pd.DataFrame(columns=["Date", "Symbol", "Dividend per Share", "Total Cash", "Currency"])
-            
         try: df_watch = pd.DataFrame(sheet.worksheet("Watchlist").get_all_records())
         except: df_watch = pd.DataFrame(columns=["Symbol"])
-            
         return df_port, df_div, df_watch
     except Exception as e:
         st.error(f"Error loading Google Sheet: {e}")
@@ -72,29 +65,17 @@ if df.empty:
     st.stop()
 
 df.columns = [c.strip() for c in df.columns]
-required = ["Symbol", "Current Price", "Trade Date", "Purchase Price", "Quantity"]
-missing = [c for c in required if c not in df.columns]
-if missing:
-    st.error(f"Missing required columns in Google Sheet: {missing}")
-    st.stop()
-
 df["Trade Date"] = pd.to_datetime(df["Trade Date"].astype(str), format="%Y%m%d", errors="coerce")
 for c in ["Current Price", "Purchase Price", "Quantity"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 df = df.dropna(subset=["Symbol", "Current Price", "Purchase Price", "Quantity"])
 
-# -----------------------------
-# MARKET STATUS & LIVE PRICES
-# -----------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_live_prices(tickers):
     live_data = {}
     for t in tickers:
-        try:
-            ticker = yf.Ticker(t)
-            live_data[t] = ticker.fast_info['last_price']
-        except:
-            live_data[t] = np.nan
+        try: live_data[t] = yf.Ticker(t).fast_info['last_price']
+        except: live_data[t] = np.nan
     return live_data
 
 def get_market_status():
@@ -106,9 +87,6 @@ def get_market_status():
 
 is_market_open, current_time = get_market_status()
 
-# -----------------------------
-# Sidebar controls
-# -----------------------------
 with st.sidebar:
     st.header("Terminal Settings")
     if is_market_open:
@@ -131,18 +109,12 @@ with st.sidebar:
 if live_mode:
     st_autorefresh(interval=60000, key="live_tracker_refresh")
 
-# -----------------------------
-# Currency & Live Price Handling
-# -----------------------------
 df["Currency"] = np.where(df["Symbol"].str.endswith(".TO"), "CAD", "USD")
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fx(ticker):
-    try:
-        fx = yf.Ticker(ticker)
-        return fx.fast_info['last_price']
-    except:
-        return 0.6974
+    try: return yf.Ticker(ticker).fast_info['last_price']
+    except: return 0.6974
 
 cad_usd = get_fx(fx_ticker)
 st.sidebar.metric("CAD→USD used", f"{cad_usd:.4f}")
@@ -152,17 +124,12 @@ live_prices = fetch_live_prices(tuple(tickers))
 
 def get_best_price(row):
     live_p = live_prices.get(row["Symbol"])
-    if pd.notna(live_p) and live_p > 0:
-        return live_p
-    return row["Current Price"]
+    return live_p if pd.notna(live_p) and live_p > 0 else row["Current Price"]
 
 df["Current Price Live"] = df.apply(get_best_price, axis=1)
 df["Current Price USD"] = np.where(df["Currency"] == "CAD", df["Current Price Live"] * cad_usd, df["Current Price Live"])
 df["Purchase Price USD"] = np.where(df["Currency"] == "CAD", df["Purchase Price"] * cad_usd, df["Purchase Price"])
 
-# -----------------------------
-# DIVIDEND AUTO-TRACKER
-# -----------------------------
 @st.cache_data(ttl=3600, show_spinner="Checking for new dividends...")
 def check_and_update_dividends(sheet_id, tickers):
     try:
@@ -170,34 +137,24 @@ def check_and_update_dividends(sheet_id, tickers):
         sheet = client.open_by_key(sheet_id)
         try: sheet_div = sheet.worksheet("Dividends")
         except: return None 
-            
         existing_divs = pd.DataFrame(sheet_div.get_all_records())
-        if existing_divs.empty:
-            existing_divs = pd.DataFrame(columns=["Date", "Symbol", "Dividend per Share", "Total Cash", "Currency"])
-            
+        if existing_divs.empty: existing_divs = pd.DataFrame(columns=["Date", "Symbol", "Dividend per Share", "Total Cash", "Currency"])
         new_rows = []
         for t in tickers:
             try:
                 ticker = yf.Ticker(t)
                 divs = ticker.dividends
                 if divs.empty: continue
-                
                 last_div_date = divs.index[-1].strftime("%Y-%m-%d")
                 last_div_amt = float(divs.iloc[-1])
-                
                 already_logged = existing_divs[(existing_divs["Symbol"] == t) & (existing_divs["Date"] == last_div_date)]
-                
                 if already_logged.empty:
                     days_ago = (datetime.now() - divs.index[-1].replace(tzinfo=None)).days
                     if 0 <= days_ago <= 30:
                         total_shares = df[df["Symbol"] == t]["Quantity"].sum()
                         if total_shares > 0:
-                            new_rows.append({
-                                "Date": last_div_date, "Symbol": t, "Dividend per Share": last_div_amt,
-                                "Total Cash": total_shares * last_div_amt, "Currency": "CAD" if t.endswith(".TO") else "USD"
-                            })
+                            new_rows.append({"Date": last_div_date, "Symbol": t, "Dividend per Share": last_div_amt, "Total Cash": total_shares * last_div_amt, "Currency": "CAD" if t.endswith(".TO") else "USD"})
             except: continue
-                
         if new_rows:
             existing_df = pd.concat([existing_divs, pd.DataFrame(new_rows)], ignore_index=True)
             set_with_dataframe(sheet_div, existing_df)
@@ -217,9 +174,6 @@ if not df_div.empty:
 else:
     total_div_usd = 0
 
-# -----------------------------
-# Position aggregation
-# -----------------------------
 df["Market Value"] = df["Current Price USD"] * df["Quantity"]
 df["Cost Basis"] = df["Purchase Price USD"] * df["Quantity"]
 
@@ -235,11 +189,10 @@ prev_closes = fetch_prev_closes(tuple(tickers))
 df["Prev Close"] = df["Symbol"].map(prev_closes)
 df["Prev Close USD"] = np.where(df["Currency"] == "CAD", df["Prev Close"] * cad_usd, df["Prev Close"])
 df["Daily P&L"] = (df["Current Price USD"] - df["Prev Close USD"]) * df["Quantity"]
-
 daily_pnl = df["Daily P&L"].sum()
 
 # -----------------------------
-# NEW: TIME PERIOD RETURNS (Daily, MTD, QTD)
+# TIME PERIOD RETURNS
 # -----------------------------
 today = datetime.now()
 start_of_month = today.replace(day=1)
@@ -252,26 +205,24 @@ def fetch_period_returns(tickers, mom_date, qtd_date):
     for t in tickers:
         try:
             ticker = yf.Ticker(t)
-            
-            # 1. Daily
-            prev_close = ticker.fast_info.get('previous_close', np.nan)
-            curr_price = ticker.fast_info.get('last_price', np.nan)
-            daily_ret = ((curr_price / prev_close) - 1) * 100 if pd.notna(prev_close) and prev_close > 0 else np.nan
-            
-            # 2. MTD & QTD (Fetch 3 months of history to be safe)
+            # Fetch 3 months of data
             hist = ticker.history(period="3mo")
             if hist.empty:
-                data.append({"Symbol": t, "Daily %": daily_ret, "MTD %": np.nan, "QTD %": np.nan})
+                data.append({"Symbol": t, "Daily %": np.nan, "MTD %": np.nan, "QTD %": np.nan})
                 continue
                 
             hist.index = hist.index.tz_localize(None)
+            curr_price = hist['Close'].iloc[-1]
             
-            # Get price at end of last month
+            # Daily % (Last day vs Previous day)
+            daily_ret = ((hist['Close'].iloc[-1] / hist['Close'].iloc[-2]) - 1) * 100 if len(hist) >= 2 else np.nan
+            
+            # MTD % (Current vs end of last month)
             mom_data = hist[hist.index <= mom_date]
             mom_price = mom_data['Close'].iloc[-1] if not mom_data.empty else hist['Close'].iloc[0]
             mom_ret = ((curr_price / mom_price) - 1) * 100 if pd.notna(mom_price) and mom_price > 0 else np.nan
             
-            # Get price at start of quarter
+            # QTD % (Current vs start of quarter)
             qtd_data = hist[hist.index >= qtd_date]
             qtd_price = qtd_data['Close'].iloc[0] if not qtd_data.empty else hist['Close'].iloc[0]
             qtd_ret = ((curr_price / qtd_price) - 1) * 100 if pd.notna(qtd_price) and qtd_price > 0 else np.nan
@@ -307,18 +258,16 @@ pos["Weight_Cost"] = pos["Cost_Basis"] / pos["Cost_Basis"].sum()
 pos["Unrealized_PnL"] = pos["Market_Value"] - pos["Cost_Basis"]
 pos["Return_%"] = np.where(pos["Cost_Basis"] > 0, pos["Unrealized_PnL"] / pos["Cost_Basis"] * 100, np.nan)
 
-# Merge period returns into main pos table
 pos = pos.merge(df_period_returns, on="Symbol", how="left")
 
-# Calculate Portfolio-level weighted period returns
 port_daily_ret = (pos["Daily %"] * pos["Weight_MV"]).sum()
 port_mtd_ret = (pos["MTD %"] * pos["Weight_MV"]).sum()
 port_qtd_ret = (pos["QTD %"] * pos["Weight_MV"]).sum()
 
 # -----------------------------
-# Price history for risk
+# RISK METRICS (VaR, Beta)
 # -----------------------------
-end_date = datetime(2026, 11, 19)
+end_date = datetime.now() # <--- FIXED: Uses today's date!
 start_date = end_date - pd.DateOffset(days=int((lookback_years + 0.1) * 365))
 bench = benchmark.strip()
 
@@ -351,9 +300,6 @@ if bench not in returns.columns:
     st.error(f"Benchmark {bench} data missing.")
     st.stop()
 
-# -----------------------------
-# Weights, Risk, & Metrics
-# -----------------------------
 w = pos.set_index("Symbol").loc[valid, "Market_Value"]
 w = w / w.sum()
 port_ret = (returns[valid] * w).sum(axis=1)
@@ -421,7 +367,6 @@ comp_var_df = pd.DataFrame(comp_var_data).sort_values("Component VaR ($)", ascen
 def xnpv(rate, cashflows):
     t0 = cashflows[0][0]
     return sum(cf / (1 + rate) ** ((d - t0).days / 365.0) for d, cf in cashflows)
-
 def xirr(cashflows):
     try: return brentq(lambda r: xnpv(r, cashflows), -0.9999, 10)
     except: return np.nan
@@ -444,25 +389,16 @@ with tab1:
     c4.metric("Dividends Collected", f"${total_div_usd:,.0f}")
     c5.metric("Portfolio XIRR", f"{port_xirr*100:.1f}%" if not np.isnan(port_xirr) else "n/a")
 
-    # NEW: RETURNS BY TIME PERIOD SECTION
     st.subheader("Returns by Time Period")
-    
-    # Portfolio Level Metrics
     rc1, rc2, rc3 = st.columns(3)
     rc1.metric("Portfolio Daily Return", f"{port_daily_ret:+.2f}%")
     rc2.metric("Portfolio Month-to-Date", f"{port_mtd_ret:+.2f}%")
     rc3.metric("Portfolio Quarter-to-Date", f"{port_qtd_ret:+.2f}%")
     
-    # Table
     period_table = pos[["Symbol", "Weight_MV", "Daily %", "MTD %", "QTD %"]].sort_values("Weight_MV", ascending=False).copy()
-    
     period_style = period_table.style.format({
-        "Weight_MV": "{:.1%}",
-        "Daily %": "{:+.2f}%",
-        "MTD %": "{:+.2f}%",
-        "QTD %": "{:+.2f}%"
+        "Weight_MV": "{:.1%}", "Daily %": "{:+.2f}%", "MTD %": "{:+.2f}%", "QTD %": "{:+.2f}%"
     }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Daily %", "MTD %", "QTD %"])
-    
     st.dataframe(period_style, use_container_width=True)
 
     st.subheader("Allocation by market value")
@@ -474,8 +410,7 @@ with tab1:
     st.plotly_chart(px.bar(cmp, x="Symbol", y="USD", color="Type", barmode="group", color_discrete_sequence=["#4A3B32", "#FF6B00"]), use_container_width=True)
 
 with tab2:
-    if missing_data:
-        st.warning(f"No/insufficient price history (excluded from risk): {', '.join(missing_data)}")
+    if missing_data: st.warning(f"No/insufficient price history (excluded from risk): {', '.join(missing_data)}")
     
     st.subheader("Performance & Risk Snapshot")
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -558,7 +493,6 @@ with tab5:
         with col2:
             new_price = st.number_input("Price per Share", min_value=0.01, step=1.0, format="%.2f")
             new_date = st.date_input("Trade Date", datetime.now())
-            
         submitted = st.form_submit_button("Submit Trade")
         
         if submitted:
@@ -583,78 +517,12 @@ with tab5:
 
 with tab6:
     st.subheader("Dividend History & Breakdown")
-    if df_div.empty:
-        st.info("No dividends logged yet.")
+    if df_div.empty: st.info("No dividends logged yet.")
     else:
         c1, c2 = st.columns(2)
         c1.metric("Total Dividends Collected (USD)", f"${total_div_usd:,.2f}")
         c2.metric("Total Payouts Logged", len(df_div))
-        
         div_by_symbol = df_div.groupby("Symbol")["Total Cash USD"].sum().reset_index().sort_values("Total Cash USD", ascending=False)
         fig_div = px.bar(div_by_symbol, x="Symbol", y="Total Cash USD", text_auto='.2s', color="Symbol", color_discrete_sequence=px.colors.sequential.Oranges_r)
         fig_div.update_layout(showlegend=False, yaxis_title="Cash Received (USD)")
-        st.plotly_chart(fig_div, use_container_width=True)
-        
-        display_div = df_div.sort_values("Date", ascending=False).copy()
-        st.dataframe(display_div.style.format({"Dividend per Share": "{:.4f}", "Total Cash": "${:,.2f}", "Total Cash USD": "${:,.2f}"}), use_container_width=True)
-
-with tab7:
-    st.subheader("Watchlist Tracker")
-    with st.form("add_watchlist_form", clear_on_submit=True):
-        col1, col2 = st.columns([3, 1])
-        with col1: new_watch_symbol = st.text_input("Add Ticker to Watchlist").upper().strip()
-        with col2:
-            st.write(""); st.write("")
-            submit_watch = st.form_submit_button("Add Ticker")
-            
-        if submit_watch and new_watch_symbol:
-            try:
-                client = get_gspread_client()
-                sheet = client.open_by_key(SPREADSHEET_ID)
-                try: sheet_watch = sheet.worksheet("Watchlist")
-                except:
-                    st.error("Could not find 'Watchlist' tab in your Google Sheet.")
-                    st.stop()
-                existing_watch = pd.DataFrame(sheet_watch.get_all_records())
-                if new_watch_symbol not in existing_watch["Symbol"].values:
-                    new_watch_row = pd.DataFrame([{"Symbol": new_watch_symbol}])
-                    existing_watch = pd.concat([existing_watch, new_watch_row], ignore_index=True)
-                    set_with_dataframe(sheet_watch, existing_watch)
-                    st.success(f"Added {new_watch_symbol} to Watchlist!")
-                    st.cache_data.clear()
-                    st.rerun()
-                else: st.warning(f"{new_watch_symbol} is already on the watchlist.")
-            except Exception as e: st.error(f"Error updating watchlist: {e}")
-
-    if df_watch.empty:
-        st.info("Watchlist is empty. Add a ticker above!")
-    else:
-        watch_tickers = df_watch["Symbol"].tolist()
-        
-        @st.cache_data(ttl=300, show_spinner="Fetching watchlist data...")
-        def fetch_watchlist_data(tickers):
-            data = []
-            for t in tickers:
-                try:
-                    ticker = yf.Ticker(t)
-                    info = ticker.fast_info
-                    hist = ticker.history(period="ytd")
-                    ytd_ret = (hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100 if not hist.empty else np.nan
-                    curr = "CAD" if t.endswith(".TO") else "USD"
-                    data.append({
-                        "Symbol": t, "Price": info.get('last_price', np.nan),
-                        "Daily Change (%)": (info.get('last_price', 0) / info.get('previous_close', 1) - 1) * 100,
-                        "YTD Return (%)": ytd_ret, "52W High": info.get('year_high', np.nan),
-                        "52W Low": info.get('year_low', np.nan), "Currency": curr
-                    })
-                except: continue
-            return pd.DataFrame(data)
-            
-        watch_data = fetch_watchlist_data(tuple(watch_tickers))
-        
-        if not watch_data.empty:
-            watch_style = watch_data.style.format({
-                "Price": "{:.2f}", "Daily Change (%)": "{:+.2f}%", "YTD Return (%)": "{:+.2f}%",
-                "52W High": "{:.2f}", "52W Low": "{:.2f}"
-            }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Daily Change (%)", "YTD Return (%)"])
-            st.dataframe(watch_style, use_container_width=True)
+        st.plotly_chart(fig_div, use_container_width
