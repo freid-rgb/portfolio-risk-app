@@ -195,7 +195,7 @@ df["Daily P&L"] = (df["Current Price USD"] - df["Prev Close USD"]) * df["Quantit
 daily_pnl = df["Daily P&L"].sum()
 
 # -----------------------------
-# TIME PERIOD RETURNS
+# TIME PERIOD RETURNS & CONTRIBUTIONS
 # -----------------------------
 today = datetime.now()
 start_of_month = today.replace(day=1)
@@ -259,9 +259,20 @@ pos["Return_%"] = np.where(pos["Cost_Basis"] > 0, pos["Unrealized_PnL"] / pos["C
 
 pos = pos.merge(df_period_returns, on="Symbol", how="left")
 
-port_daily_ret = (pos["Daily %"] * pos["Weight_MV"]).sum()
-port_mtd_ret = (pos["MTD %"] * pos["Weight_MV"]).sum()
-port_qtd_ret = (pos["QTD %"] * pos["Weight_MV"]).sum()
+# Calculate Contributions (Weight * Return)
+pos["Daily Contrib %"] = (pos["Daily %"] / 100) * pos["Weight_MV"] * 100
+pos["MTD Contrib %"] = (pos["MTD %"] / 100) * pos["Weight_MV"] * 100
+pos["QTD Contrib %"] = (pos["QTD %"] / 100) * pos["Weight_MV"] * 100
+
+# Calculate Dollar Impact (Contribution % * Total Portfolio Value)
+total_port_val = pos["Market_Value"].sum()
+pos["Daily $ Impact"] = (pos["Daily Contrib %"] / 100) * total_port_val
+pos["MTD $ Impact"] = (pos["MTD Contrib %"] / 100) * total_port_val
+pos["QTD $ Impact"] = (pos["QTD Contrib %"] / 100) * total_port_val
+
+port_daily_ret = pos["Daily Contrib %"].sum()
+port_mtd_ret = pos["MTD Contrib %"].sum()
+port_qtd_ret = pos["QTD Contrib %"].sum()
 
 # -----------------------------
 # RISK METRICS (VaR, Beta)
@@ -388,25 +399,61 @@ with tab1:
     c4.metric("Dividends Collected", f"${total_div_usd:,.0f}")
     c5.metric("Portfolio XIRR", f"{port_xirr*100:.1f}%" if not np.isnan(port_xirr) else "n/a")
 
-    st.subheader("Returns by Time Period")
+    st.subheader("Returns & Contribution by Time Period")
+    
     rc1, rc2, rc3 = st.columns(3)
     rc1.metric("Portfolio Daily Return", f"{port_daily_ret:+.2f}%")
     rc2.metric("Portfolio Month-to-Date", f"{port_mtd_ret:+.2f}%")
     rc3.metric("Portfolio Quarter-to-Date", f"{port_qtd_ret:+.2f}%")
     
-    period_table = pos[["Symbol", "Weight_MV", "Daily %", "MTD %", "QTD %"]].sort_values("Weight_MV", ascending=False).copy()
+    # NEW: Contribution Table
+    period_table = pos[["Symbol", "Weight_MV", "Daily %", "Daily Contrib %", "Daily $ Impact", "MTD %", "MTD Contrib %", "MTD $ Impact", "QTD %", "QTD Contrib %", "QTD $ Impact"]].sort_values("Weight_MV", ascending=False).copy()
+    
+    # Rename columns for clean display
+    period_table = period_table.rename(columns={
+        "Weight_MV": "Weight",
+        "Daily %": "D %",
+        "Daily Contrib %": "D Contrib",
+        "Daily $ Impact": "D $ Impact",
+        "MTD %": "MTD %",
+        "MTD Contrib %": "MTD Contrib",
+        "MTD $ Impact": "MTD $ Impact",
+        "QTD %": "QTD %",
+        "QTD Contrib %": "QTD Contrib",
+        "QTD $ Impact": "QTD $ Impact"
+    })
+
     period_style = period_table.style.format({
-        "Weight_MV": "{:.1%}", "Daily %": "{:+.2f}%", "MTD %": "{:+.2f}%", "QTD %": "{:+.2f}%"
-    }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Daily %", "MTD %", "QTD %"])
+        "Weight": "{:.1%}", 
+        "D %": "{:+.2f}%", "D Contrib": "{:+.2f}%", "D $ Impact": "${:+,.2f}",
+        "MTD %": "{:+.2f}%", "MTD Contrib": "{:+.2f}%", "MTD $ Impact": "${:+,.2f}",
+        "QTD %": "{:+.2f}%", "QTD Contrib": "{:+.2f}%", "QTD $ Impact": "${:+,.2f}"
+    }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["D %", "D Contrib", "D $ Impact", "MTD %", "MTD Contrib", "MTD $ Impact", "QTD %", "QTD Contrib", "QTD $ Impact"])
+    
     st.dataframe(period_style, use_container_width=True)
+
+    # NEW: Waterfall Chart for Daily Contribution
+    st.subheader("Daily Contribution to Return ($)")
+    waterfall_df = pos[["Symbol", "Daily $ Impact"]].sort_values("Daily $ Impact", ascending=False)
+    
+    fig_waterfall = go.Figure(go.Waterfall(
+        name="Daily P&L", orientation="v",
+        measure=["relative"] * len(waterfall_df) + ["total"],
+        x=list(waterfall_df["Symbol"]) + ["Total Portfolio"],
+        y=list(waterfall_df["Daily $ Impact"]) + [daily_pnl],
+        text=[f"${v:,.0f}" for v in waterfall_df["Daily $ Impact"]] + [f"${daily_pnl:,.0f}"],
+        textposition="outside",
+        connector={"line": {"color": "#3D3026"}},
+        decreasing={"marker": {"color": "#FF4B4B"}},
+        increasing={"marker": {"color": "#00FFAA"}},
+        totals={"marker": {"color": "#FF6B00"}}
+    ))
+    fig_waterfall.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#EBD5B3"), showlegend=False)
+    st.plotly_chart(fig_waterfall, use_container_width=True)
 
     st.subheader("Allocation by market value")
     fig = px.pie(pos, names="Symbol", values="Market_Value", hole=0.4, color_discrete_sequence=px.colors.sequential.Oranges_r)
     st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Cost basis vs market value")
-    cmp = pos[["Symbol", "Cost_Basis", "Market_Value"]].melt(id_vars="Symbol", var_name="Type", value_name="USD")
-    st.plotly_chart(px.bar(cmp, x="Symbol", y="USD", color="Type", barmode="group", color_discrete_sequence=["#4A3B32", "#FF6B00"]), use_container_width=True)
 
 with tab2:
     if missing_data: st.warning(f"No/insufficient price history (excluded from risk): {', '.join(missing_data)}")
