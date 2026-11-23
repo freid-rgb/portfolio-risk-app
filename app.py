@@ -484,14 +484,12 @@ with tab3:
     col1, col2 = st.columns(2)
     
     with col1:
-        # Donut Chart
         fig_pie = px.pie(pos, names="Symbol", values="Market_Value", hole=0.5, color_discrete_sequence=px.colors.sequential.Oranges_r)
         fig_pie.update_traces(textposition='inside', textinfo='percent+label')
         fig_pie.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#EBD5B3"))
         st.plotly_chart(fig_pie, use_container_width=True)
 
     with col2:
-        # Horizontal Bar Chart
         pos_sorted = pos.sort_values("Weight_MV", ascending=True)
         fig_bar = px.bar(pos_sorted, x="Weight_MV", y="Symbol", orientation='h', color="Weight_MV", color_continuous_scale="Oranges")
         fig_bar.update_layout(xaxis_title="Portfolio Weight", yaxis_title="", coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#EBD5B3"))
@@ -502,10 +500,10 @@ with tab3:
     st.subheader("Target Allocation & Rebalancing")
     st.write("Type your Target % below. The app will calculate exactly how many shares you need to Buy or Sell to hit your goal.")
     
-    # Target Rebalancing Logic
-    # We use st.data_editor to let the user type in target percentages
-    rebal_df = pos[["Symbol", "Quantity", "Current Price Live", "Market_Value", "Weight_MV"]].copy()
-    rebal_df["Target %"] = 0.0 # Default to 0
+    # Calculate average live price per share for the rebalancing table
+    pos["Avg_Current_Price"] = pos["Market_Value"] / pos["Quantity"]
+    rebal_df = pos[["Symbol", "Quantity", "Avg_Current_Price", "Market_Value", "Weight_MV"]].copy()
+    rebal_df["Target %"] = 0.0
     rebal_df = rebal_df.rename(columns={"Weight_MV": "Actual %"})
     
     edited_df = st.data_editor(
@@ -513,7 +511,7 @@ with tab3:
         column_config={
             "Symbol": st.column_config.TextColumn("Symbol", disabled=True),
             "Quantity": st.column_config.NumberColumn("Current Shares", disabled=True, format="%.2f"),
-            "Current Price Live": st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
+            "Avg_Current_Price": st.column_config.NumberColumn("Price", disabled=True, format="$%.2f"),
             "Market_Value": st.column_config.NumberColumn("Current Value", disabled=True, format="$%.2f"),
             "Actual %": st.column_config.NumberColumn("Actual %", disabled=True, format="%.2f%%"),
             "Target %": st.column_config.NumberColumn("Target % (Type Here)", min_value=0.0, max_value=100.0, format="%.2f%%")
@@ -523,30 +521,25 @@ with tab3:
         key="rebalance_editor"
     )
     
-    # Calculate shares to trade
     total_target = edited_df["Target %"].sum()
     if total_target > 100.0:
         st.warning(f"Your targets sum to {total_target:.2f}%. Please adjust so they equal 100% or less.")
     
-    # Calculate dollar target and shares to buy/sell
     edited_df["Target $"] = (edited_df["Target %"] / 100) * total_port_val
     edited_df["$ To Trade"] = edited_df["Target $"] - edited_df["Market_Value"]
-    edited_df["Shares To Trade"] = edited_df["$ To Trade"] / edited_df["Current Price Live"]
+    edited_df["Shares To Trade"] = edited_df["$ To Trade"] / edited_df["Avg_Current_Price"]
     
-    # Display action items
     actions = edited_df[abs(edited_df["Shares To Trade"]) > 0.01].copy()
     if not actions.empty:
         actions["Action"] = np.where(actions["Shares To Trade"] > 0, "BUY", "SELL")
         actions["Shares To Trade"] = actions["Shares To Trade"].abs()
         
         st.write("### Action Items to Reach Target")
-        
-        action_style = actions[["Action", "Symbol", "Shares To Trade", "Current Price Live", "$ To Trade"]].style.format({
+        action_style = actions[["Action", "Symbol", "Shares To Trade", "Avg_Current_Price", "$ To Trade"]].style.format({
             "Shares To Trade": "{:.2f}",
-            "Current Price Live": "${:.2f}",
+            "Avg_Current_Price": "${:.2f}",
             "$ To Trade": "${:+,.2f}"
         }).map(lambda x: 'color: #00FFAA' if x == "BUY" else 'color: #FF4B4B' if x == "SELL" else '', subset=["Action"])
-        
         st.dataframe(action_style, use_container_width=True, hide_index=True)
     else:
         st.info("Enter Target % above to see your rebalancing trades.")
