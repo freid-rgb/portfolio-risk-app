@@ -32,6 +32,9 @@ st.markdown("""
 st.title("🏜️ Arrakis Portfolio Terminal")
 st.caption("Spice · VaR · Beta · Volatility · Cost Basis · Lot-level P&L")
 
+# -----------------------------
+# GOOGLE SHEETS CONNECTION
+# -----------------------------
 SPREADSHEET_ID = "1Y5tdp37t-p-E6ixLIVQddRMVO-WFdCdCK9L2ed3bjvw"
 
 @st.cache_resource
@@ -205,7 +208,6 @@ def fetch_period_returns(tickers, mom_date, qtd_date):
     for t in tickers:
         try:
             ticker = yf.Ticker(t)
-            # Fetch 3 months of data
             hist = ticker.history(period="3mo")
             if hist.empty:
                 data.append({"Symbol": t, "Daily %": np.nan, "MTD %": np.nan, "QTD %": np.nan})
@@ -214,15 +216,12 @@ def fetch_period_returns(tickers, mom_date, qtd_date):
             hist.index = hist.index.tz_localize(None)
             curr_price = hist['Close'].iloc[-1]
             
-            # Daily % (Last day vs Previous day)
             daily_ret = ((hist['Close'].iloc[-1] / hist['Close'].iloc[-2]) - 1) * 100 if len(hist) >= 2 else np.nan
             
-            # MTD % (Current vs end of last month)
             mom_data = hist[hist.index <= mom_date]
             mom_price = mom_data['Close'].iloc[-1] if not mom_data.empty else hist['Close'].iloc[0]
             mom_ret = ((curr_price / mom_price) - 1) * 100 if pd.notna(mom_price) and mom_price > 0 else np.nan
             
-            # QTD % (Current vs start of quarter)
             qtd_data = hist[hist.index >= qtd_date]
             qtd_price = qtd_data['Close'].iloc[0] if not qtd_data.empty else hist['Close'].iloc[0]
             qtd_ret = ((curr_price / qtd_price) - 1) * 100 if pd.notna(qtd_price) and qtd_price > 0 else np.nan
@@ -267,7 +266,7 @@ port_qtd_ret = (pos["QTD %"] * pos["Weight_MV"]).sum()
 # -----------------------------
 # RISK METRICS (VaR, Beta)
 # -----------------------------
-end_date = datetime.now() # <--- FIXED: Uses today's date!
+end_date = datetime.now()
 start_date = end_date - pd.DateOffset(days=int((lookback_years + 0.1) * 365))
 bench = benchmark.strip()
 
@@ -525,4 +524,70 @@ with tab6:
         div_by_symbol = df_div.groupby("Symbol")["Total Cash USD"].sum().reset_index().sort_values("Total Cash USD", ascending=False)
         fig_div = px.bar(div_by_symbol, x="Symbol", y="Total Cash USD", text_auto='.2s', color="Symbol", color_discrete_sequence=px.colors.sequential.Oranges_r)
         fig_div.update_layout(showlegend=False, yaxis_title="Cash Received (USD)")
-        st.plotly_chart(fig_div, use_container_width
+        st.plotly_chart(fig_div, use_container_width=True)
+        
+        st.write("### Dividend Log")
+        display_div = df_div.sort_values("Date", ascending=False).copy()
+        st.dataframe(display_div.style.format({
+            "Dividend per Share": "{:.4f}", "Total Cash": "${:,.2f}", "Total Cash USD": "${:,.2f}"
+        }), use_container_width=True)
+
+with tab7:
+    st.subheader("Watchlist Tracker")
+    with st.form("add_watchlist_form", clear_on_submit=True):
+        col1, col2 = st.columns([3, 1])
+        with col1: new_watch_symbol = st.text_input("Add Ticker to Watchlist").upper().strip()
+        with col2:
+            st.write(""); st.write("")
+            submit_watch = st.form_submit_button("Add Ticker")
+            
+        if submit_watch and new_watch_symbol:
+            try:
+                client = get_gspread_client()
+                sheet = client.open_by_key(SPREADSHEET_ID)
+                try: sheet_watch = sheet.worksheet("Watchlist")
+                except:
+                    st.error("Could not find 'Watchlist' tab in your Google Sheet.")
+                    st.stop()
+                existing_watch = pd.DataFrame(sheet_watch.get_all_records())
+                if new_watch_symbol not in existing_watch["Symbol"].values:
+                    new_watch_row = pd.DataFrame([{"Symbol": new_watch_symbol}])
+                    existing_watch = pd.concat([existing_watch, new_watch_row], ignore_index=True)
+                    set_with_dataframe(sheet_watch, existing_watch)
+                    st.success(f"Added {new_watch_symbol} to Watchlist!")
+                    st.cache_data.clear()
+                    st.rerun()
+                else: st.warning(f"{new_watch_symbol} is already on the watchlist.")
+            except Exception as e: st.error(f"Error updating watchlist: {e}")
+
+    if df_watch.empty: st.info("Watchlist is empty. Add a ticker above!")
+    else:
+        watch_tickers = df_watch["Symbol"].tolist()
+        
+        @st.cache_data(ttl=300, show_spinner="Fetching watchlist data...")
+        def fetch_watchlist_data(tickers):
+            data = []
+            for t in tickers:
+                try:
+                    ticker = yf.Ticker(t)
+                    info = ticker.fast_info
+                    hist = ticker.history(period="ytd")
+                    ytd_ret = (hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100 if not hist.empty else np.nan
+                    curr = "CAD" if t.endswith(".TO") else "USD"
+                    data.append({
+                        "Symbol": t, "Price": info.get('last_price', np.nan),
+                        "Daily Change (%)": (info.get('last_price', 0) / info.get('previous_close', 1) - 1) * 100,
+                        "YTD Return (%)": ytd_ret, "52W High": info.get('year_high', np.nan),
+                        "52W Low": info.get('year_low', np.nan), "Currency": curr
+                    })
+                except: continue
+            return pd.DataFrame(data)
+            
+        watch_data = fetch_watchlist_data(tuple(watch_tickers))
+        
+        if not watch_data.empty:
+            watch_style = watch_data.style.format({
+                "Price": "{:.2f}", "Daily Change (%)": "{:+.2f}%", "YTD Return (%)": "{:+.2f}%",
+                "52W High": "{:.2f}", "52W Low": "{:.2f}"
+            }).map(lambda x: 'color: #00FFAA' if x > 0 else 'color: #FF4B4B', subset=["Daily Change (%)", "YTD Return (%)"])
+            st.dataframe(watch_style, use_container_width=True)
