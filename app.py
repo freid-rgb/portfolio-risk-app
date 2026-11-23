@@ -259,12 +259,10 @@ pos["Return_%"] = np.where(pos["Cost_Basis"] > 0, pos["Unrealized_PnL"] / pos["C
 
 pos = pos.merge(df_period_returns, on="Symbol", how="left")
 
-# Calculate Contributions (Weight * Return)
 pos["Daily Contrib %"] = (pos["Daily %"] / 100) * pos["Weight_MV"] * 100
 pos["MTD Contrib %"] = (pos["MTD %"] / 100) * pos["Weight_MV"] * 100
 pos["QTD Contrib %"] = (pos["QTD %"] / 100) * pos["Weight_MV"] * 100
 
-# Calculate Dollar Impact (Contribution % * Total Portfolio Value)
 total_port_val = pos["Market_Value"].sum()
 pos["Daily $ Impact"] = (pos["Daily Contrib %"] / 100) * total_port_val
 pos["MTD $ Impact"] = (pos["MTD Contrib %"] / 100) * total_port_val
@@ -406,10 +404,8 @@ with tab1:
     rc2.metric("Portfolio Month-to-Date", f"{port_mtd_ret:+.2f}%")
     rc3.metric("Portfolio Quarter-to-Date", f"{port_qtd_ret:+.2f}%")
     
-    # NEW: Contribution Table
     period_table = pos[["Symbol", "Weight_MV", "Daily %", "Daily Contrib %", "Daily $ Impact", "MTD %", "MTD Contrib %", "MTD $ Impact", "QTD %", "QTD Contrib %", "QTD $ Impact"]].sort_values("Weight_MV", ascending=False).copy()
     
-    # Rename columns for clean display
     period_table = period_table.rename(columns={
         "Weight_MV": "Weight",
         "Daily %": "D %",
@@ -432,7 +428,6 @@ with tab1:
     
     st.dataframe(period_style, use_container_width=True)
 
-    # NEW: Waterfall Chart for Daily Contribution
     st.subheader("Daily Contribution to Return ($)")
     waterfall_df = pos[["Symbol", "Daily $ Impact"]].sort_values("Daily $ Impact", ascending=False)
     
@@ -617,17 +612,45 @@ with tab7:
             for t in tickers:
                 try:
                     ticker = yf.Ticker(t)
-                    info = ticker.fast_info
-                    hist = ticker.history(period="ytd")
-                    ytd_ret = (hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100 if not hist.empty else np.nan
+                    
+                    # FIXED: Pulling actual historical data instead of fast_info for accuracy
+                    hist_1y = ticker.history(period="1y")
+                    hist_ytd = ticker.history(period="ytd")
+                    hist_5d = ticker.history(period="5d")
+                    
+                    if hist_1y.empty or hist_5d.empty:
+                        continue
+                        
+                    curr_price = hist_5d['Close'].iloc[-1]
+                    
+                    # Daily Change (Today vs Yesterday)
+                    prev_close = hist_5d['Close'].iloc[-2] if len(hist_5d) >= 2 else curr_price
+                    daily_change = ((curr_price / prev_close) - 1) * 100
+                    
+                    # YTD Return
+                    if not hist_ytd.empty:
+                        ytd_start = hist_ytd['Close'].iloc[0]
+                        ytd_ret = ((curr_price / ytd_start) - 1) * 100
+                    else:
+                        ytd_ret = np.nan
+                        
+                    # 52W High/Low
+                    high_52w = hist_1y['High'].max()
+                    low_52w = hist_1y['Low'].min()
+                    
                     curr = "CAD" if t.endswith(".TO") else "USD"
+                    
                     data.append({
-                        "Symbol": t, "Price": info.get('last_price', np.nan),
-                        "Daily Change (%)": (info.get('last_price', 0) / info.get('previous_close', 1) - 1) * 100,
-                        "YTD Return (%)": ytd_ret, "52W High": info.get('year_high', np.nan),
-                        "52W Low": info.get('year_low', np.nan), "Currency": curr
+                        "Symbol": t, 
+                        "Price": curr_price,
+                        "Daily Change (%)": daily_change,
+                        "YTD Return (%)": ytd_ret, 
+                        "52W High": high_52w,
+                        "52W Low": low_52w, 
+                        "Currency": curr
                     })
-                except: continue
+                except:
+                    continue
             return pd.DataFrame(data)
             
         watch_data = fetch_watchlist_data(tuple(watch_tickers))
